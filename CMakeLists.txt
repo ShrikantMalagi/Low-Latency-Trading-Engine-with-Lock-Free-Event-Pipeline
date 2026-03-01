@@ -20,6 +20,13 @@ add_executable(exchange_sim
 target_include_directories(exchange_sim PRIVATE include)
 target_link_libraries(exchange_sim PRIVATE protocol)
 
+add_executable(exchange_server
+  services/exchange/server_main.cpp
+  services/exchange/exchange.cpp
+)
+target_include_directories(exchange_server PRIVATE include)
+target_link_libraries(exchange_server PRIVATE protocol)
+
 #Tests
 include(FetchContent)
 FetchContent_Declare(

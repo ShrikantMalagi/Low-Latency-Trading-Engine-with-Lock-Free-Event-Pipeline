@@ -24,6 +24,10 @@ namespace wire{
         int64_t  price;
         int64_t  qty;
     };
+
+    struct Cancel {
+        uint64_t order_id;
+    };
     
     struct Ack {
         uint64_t order_id;
@@ -33,6 +37,11 @@ namespace wire{
         uint64_t order_id;
         int64_t  price;
         int64_t  qty;
+    };
+
+    struct Reject {
+        uint64_t order_id;
+        uint16_t reason;
     };
     
     #pragma pack(pop)

@@ -13,6 +13,16 @@
 #include <iostream>
 #include <vector>
 
+namespace{
+    int make_listen_socket(int port);
+
+    int accept_client(int listen_fd);
+
+    bool read_exact(int fd, void* buf, size_t n);
+
+    bool write_all(int fd, const void* buf, size_t n);
+}
+
 int main()
 {   
 
