@@ -1,4 +1,5 @@
 #include "exchange.hpp"
+#include "error.hpp"
 #include <iostream>
 
 using namespace hft;
