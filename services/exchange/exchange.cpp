@@ -1,4 +1,5 @@
 #include "exchange.hpp"
+#include "error.hpp"
 #include <algorithm>
 
 namespace hft {
@@ -73,6 +74,16 @@ BookTop Exchange::top() const {
   if (!bids_.empty()) t.best_bid = bids_.front().price;
   if (!asks_.empty()) t.best_ask = asks_.front().price;
   return t;
+}
+
+bool Exchange::has_order(uint64_t order_id) const{
+  auto exists_on_side = [&](const std::vector<Order>& side) {
+    return std::any_of(side.begin(), side.end(), [&](const Order& o) {
+      return o.order_id == order_id;
+    });
+  };
+
+  return exists_on_side(bids_) || exists_on_side(asks_);
 }
 
 }
