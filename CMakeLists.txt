@@ -45,5 +45,16 @@ add_executable(exchange_tests
 target_include_directories(exchange_tests PRIVATE include)
 target_link_libraries(exchange_tests PRIVATE GTest::gtest_main protocol)
 
+add_executable(server_integration_tests
+  tests/test_server_integration.cpp
+)
+target_include_directories(server_integration_tests PRIVATE include)
+target_compile_definitions(
+  server_integration_tests PRIVATE
+  EXCHANGE_SERVER_PATH="$<TARGET_FILE:exchange_server>"
+)
+target_link_libraries(server_integration_tests PRIVATE GTest::gtest_main protocol)
+
 include(GoogleTest)
 gtest_discover_tests(exchange_tests)
+gtest_discover_tests(server_integration_tests)
