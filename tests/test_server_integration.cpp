@@ -250,3 +250,70 @@ TEST_F(ServerFixture, InvalidSideReturnsReject) {
 
   ::close(fd);
 }
+
+TEST_F(ServerFixture, CrossingOrderReturnsAckThenFill) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header resting_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 31,
+  };
+  const wire::NewOrder resting_order{
+      .order_id = 1001,
+      .side = 1,
+      .price = 101,
+      .qty = 7,
+  };
+
+  ASSERT_TRUE(write_all(fd, &resting_hdr, sizeof(resting_hdr)));
+  ASSERT_TRUE(write_all(fd, &resting_order, sizeof(resting_order)));
+
+  wire::Header resting_ack_hdr{};
+  wire::Ack resting_ack{};
+  ASSERT_TRUE(read_exact(fd, &resting_ack_hdr, sizeof(resting_ack_hdr)));
+  ASSERT_TRUE(read_exact(fd, &resting_ack, sizeof(resting_ack)));
+  ASSERT_EQ(resting_ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(resting_ack_hdr.seq, 31);
+  ASSERT_EQ(resting_ack.order_id, 1001u);
+
+  const wire::Header taker_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 32,
+  };
+  const wire::NewOrder taker_order{
+      .order_id = 1002,
+      .side = 0,
+      .price = 105,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd, &taker_hdr, sizeof(taker_hdr)));
+  ASSERT_TRUE(write_all(fd, &taker_order, sizeof(taker_order)));
+
+  wire::Header taker_ack_hdr{};
+  wire::Ack taker_ack{};
+  ASSERT_TRUE(read_exact(fd, &taker_ack_hdr, sizeof(taker_ack_hdr)));
+  ASSERT_TRUE(read_exact(fd, &taker_ack, sizeof(taker_ack)));
+
+  EXPECT_EQ(taker_ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  EXPECT_EQ(taker_ack_hdr.length, sizeof(wire::Ack));
+  EXPECT_EQ(taker_ack_hdr.seq, 32);
+  EXPECT_EQ(taker_ack.order_id, 1002u);
+
+  wire::Header fill_hdr{};
+  wire::Fill fill{};
+  ASSERT_TRUE(read_exact(fd, &fill_hdr, sizeof(fill_hdr)));
+  ASSERT_TRUE(read_exact(fd, &fill, sizeof(fill)));
+
+  EXPECT_EQ(fill_hdr.type, static_cast<uint16_t>(wire::MsgType::Fill));
+  EXPECT_EQ(fill_hdr.length, sizeof(wire::Fill));
+  EXPECT_EQ(fill_hdr.seq, 32);
+  EXPECT_EQ(fill.order_id, 1002u);
+  EXPECT_EQ(fill.price, 101);
+  EXPECT_EQ(fill.qty, 5);
+
+  ::close(fd);
+}
