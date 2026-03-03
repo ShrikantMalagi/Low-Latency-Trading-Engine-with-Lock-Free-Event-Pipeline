@@ -18,6 +18,10 @@
 #include <thread>
 #include <unistd.h>
 
+#ifndef EXCHANGE_SERVER_PATH
+#define EXCHANGE_SERVER_PATH "./exchange_server"
+#endif
+
 namespace {
 
 constexpr int kPort = 9000;
@@ -436,6 +440,129 @@ TEST_F(ServerFixture, NonPositivePriceReturnsReject) {
   EXPECT_EQ(reply_hdr.seq, 52);
   EXPECT_EQ(reply.order_id, 2002u);
   EXPECT_EQ(reply.reason, 5);
+
+  ::close(fd);
+}
+
+TEST_F(ServerFixture, DuplicateOrderIdReturnsReject) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header first_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 61,
+  };
+  const wire::NewOrder first_msg{
+      .order_id = 3001,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd, &first_hdr, sizeof(first_hdr)));
+  ASSERT_TRUE(write_all(fd, &first_msg, sizeof(first_msg)));
+
+  wire::Header first_reply_hdr{};
+  wire::Ack first_reply{};
+  ASSERT_TRUE(read_exact(fd, &first_reply_hdr, sizeof(first_reply_hdr)));
+  ASSERT_TRUE(read_exact(fd, &first_reply, sizeof(first_reply)));
+
+  ASSERT_EQ(first_reply_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(first_reply_hdr.seq, 61);
+  ASSERT_EQ(first_reply.order_id, 3001u);
+
+  const wire::Header second_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 62,
+  };
+  const wire::NewOrder second_msg{
+      .order_id = 3001,
+      .side = 1,
+      .price = 101,
+      .qty = 3,
+  };
+
+  ASSERT_TRUE(write_all(fd, &second_hdr, sizeof(second_hdr)));
+  ASSERT_TRUE(write_all(fd, &second_msg, sizeof(second_msg)));
+
+  wire::Header reject_hdr{};
+  wire::Reject reject{};
+  ASSERT_TRUE(read_exact(fd, &reject_hdr, sizeof(reject_hdr)));
+  ASSERT_TRUE(read_exact(fd, &reject, sizeof(reject)));
+
+  EXPECT_EQ(reject_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(reject_hdr.length, sizeof(wire::Reject));
+  EXPECT_EQ(reject_hdr.seq, 62);
+  EXPECT_EQ(reject.order_id, 3001u);
+  EXPECT_EQ(reject.reason, 6);
+
+  ::close(fd);
+}
+
+TEST_F(ServerFixture, OrderIdCanBeReusedAfterCancel) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header new_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 71,
+  };
+  const wire::NewOrder first_order{
+      .order_id = 4001,
+      .side = 0,
+      .price = 100,
+      .qty = 2,
+  };
+
+  ASSERT_TRUE(write_all(fd, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd, &first_order, sizeof(first_order)));
+
+  wire::Header ack1_hdr{};
+  wire::Ack ack1{};
+  ASSERT_TRUE(read_exact(fd, &ack1_hdr, sizeof(ack1_hdr)));
+  ASSERT_TRUE(read_exact(fd, &ack1, sizeof(ack1)));
+
+  const wire::Header cancel_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::Cancel),
+      .length = static_cast<uint16_t>(sizeof(wire::Cancel)),
+      .seq = 72,
+  };
+  const wire::Cancel cancel_msg{.order_id = 4001};
+
+  ASSERT_TRUE(write_all(fd, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd, &cancel_msg, sizeof(cancel_msg)));
+
+  wire::Header cancel_ack_hdr{};
+  wire::Ack cancel_ack{};
+  ASSERT_TRUE(read_exact(fd, &cancel_ack_hdr, sizeof(cancel_ack_hdr)));
+  ASSERT_TRUE(read_exact(fd, &cancel_ack, sizeof(cancel_ack)));
+
+  const wire::Header reuse_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 73,
+  };
+  const wire::NewOrder reused_order{
+      .order_id = 4001,
+      .side = 1,
+      .price = 101,
+      .qty = 4,
+  };
+
+  ASSERT_TRUE(write_all(fd, &reuse_hdr, sizeof(reuse_hdr)));
+  ASSERT_TRUE(write_all(fd, &reused_order, sizeof(reused_order)));
+
+  wire::Header ack2_hdr{};
+  wire::Ack ack2{};
+  ASSERT_TRUE(read_exact(fd, &ack2_hdr, sizeof(ack2_hdr)));
+  ASSERT_TRUE(read_exact(fd, &ack2, sizeof(ack2)));
+
+  EXPECT_EQ(ack2_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  EXPECT_EQ(ack2_hdr.seq, 73);
+  EXPECT_EQ(ack2.order_id, 4001u);
 
   ::close(fd);
 }

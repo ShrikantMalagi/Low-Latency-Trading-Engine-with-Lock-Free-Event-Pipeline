@@ -21,6 +21,7 @@ namespace{
         CancelNotFound = 3,
         InvalidQuantity = 4,
         InvalidPrice = 5,
+        DuplicateOrderId = 6,
     };
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -55,14 +56,18 @@ namespace{
     
 
     std::expected<int,hft::Error> accept_client(int server_socket){
-        int client_fd = ::accept(server_socket,nullptr,nullptr);
-        
-        if(client_fd < 0 && errno != EINTR){
+        while(true){
+            int client_fd = ::accept(server_socket,nullptr,nullptr);
+            if(client_fd >= 0){
+                return client_fd;
+            }
             
-            return std::unexpected(hft::make_sys_error(hft::ErrorCode::Accept, "accept"));
-        }
+            if( errno == EINTR){
+                continue;
+            }
 
-        return client_fd;
+            return std::unexpected(hft::make_sys_error(hft::ErrorCode::Accept, "accept"));  
+        }
     }
 
     std::expected<void, hft::Error> read_exact(int fd, void* buf, size_t n) {
@@ -189,6 +194,7 @@ namespace{
         hft::Exchange& exchange
     ) {
         wire::NewOrder msg{};
+
         
         if(auto result = read_exact(client_fd, &msg, sizeof(msg)); !result.has_value()){
             return result;
@@ -205,6 +211,10 @@ namespace{
         if (msg.price <= 0) {
             return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidPrice);
         }
+
+        if (exchange.has_order(msg.order_id)) {
+            return send_reject(client_fd, seq, msg.order_id, RejectReason::DuplicateOrderId);
+        }        
 
         hft::Order order{
             .order_id = msg.order_id,

@@ -35,6 +35,8 @@ public:
 
   BookTop top() const;
 
+  bool has_order(uint64_t order_id) const;
+
 private:
   std::vector<Order> bids_;
   std::vector<Order> asks_;
