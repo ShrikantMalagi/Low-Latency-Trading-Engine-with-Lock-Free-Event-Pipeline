@@ -317,3 +317,125 @@ TEST_F(ServerFixture, CrossingOrderReturnsAckThenFill) {
 
   ::close(fd);
 }
+
+TEST_F(ServerFixture, CancelMissingOrderReturnsReject) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header cancel_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::Cancel),
+      .length = static_cast<uint16_t>(sizeof(wire::Cancel)),
+      .seq = 41,
+  };
+  const wire::Cancel cancel_msg{
+      .order_id = 5555,
+  };
+
+  ASSERT_TRUE(write_all(fd, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd, &cancel_msg, sizeof(cancel_msg)));
+
+  wire::Header reply_hdr{};
+  wire::Reject reply{};
+  ASSERT_TRUE(read_exact(fd, &reply_hdr, sizeof(reply_hdr)));
+  ASSERT_TRUE(read_exact(fd, &reply, sizeof(reply)));
+
+  EXPECT_EQ(reply_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(reply_hdr.length, sizeof(wire::Reject));
+  EXPECT_EQ(reply_hdr.seq, 41);
+  EXPECT_EQ(reply.order_id, 5555u);
+  EXPECT_EQ(reply.reason, 3);
+
+  ::close(fd);
+}
+
+TEST_F(ServerFixture, InvalidLengthReturnsReject) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header bad_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder) - 1),
+      .seq = 42,
+  };
+
+  ASSERT_TRUE(write_all(fd, &bad_hdr, sizeof(bad_hdr)));
+
+  wire::Header reply_hdr{};
+  wire::Reject reply{};
+  ASSERT_TRUE(read_exact(fd, &reply_hdr, sizeof(reply_hdr)));
+  ASSERT_TRUE(read_exact(fd, &reply, sizeof(reply)));
+
+  EXPECT_EQ(reply_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(reply_hdr.length, sizeof(wire::Reject));
+  EXPECT_EQ(reply_hdr.seq, 42);
+  EXPECT_EQ(reply.order_id, 0u);
+  EXPECT_EQ(reply.reason, 1);
+
+  ::close(fd);
+}
+
+TEST_F(ServerFixture, ZeroQuantityReturnsReject) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 51,
+  };
+  const wire::NewOrder msg{
+      .order_id = 2001,
+      .side = 0,
+      .price = 100,
+      .qty = 0,
+  };
+
+  ASSERT_TRUE(write_all(fd, &hdr, sizeof(hdr)));
+  ASSERT_TRUE(write_all(fd, &msg, sizeof(msg)));
+
+  wire::Header reply_hdr{};
+  wire::Reject reply{};
+  ASSERT_TRUE(read_exact(fd, &reply_hdr, sizeof(reply_hdr)));
+  ASSERT_TRUE(read_exact(fd, &reply, sizeof(reply)));
+
+  EXPECT_EQ(reply_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(reply_hdr.length, sizeof(wire::Reject));
+  EXPECT_EQ(reply_hdr.seq, 51);
+  EXPECT_EQ(reply.order_id, 2001u);
+  EXPECT_EQ(reply.reason, 4);
+
+  ::close(fd);
+}
+
+TEST_F(ServerFixture, NonPositivePriceReturnsReject) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 52,
+  };
+  const wire::NewOrder msg{
+      .order_id = 2002,
+      .side = 1,
+      .price = 0,
+      .qty = 3,
+  };
+
+  ASSERT_TRUE(write_all(fd, &hdr, sizeof(hdr)));
+  ASSERT_TRUE(write_all(fd, &msg, sizeof(msg)));
+
+  wire::Header reply_hdr{};
+  wire::Reject reply{};
+  ASSERT_TRUE(read_exact(fd, &reply_hdr, sizeof(reply_hdr)));
+  ASSERT_TRUE(read_exact(fd, &reply, sizeof(reply)));
+
+  EXPECT_EQ(reply_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(reply_hdr.length, sizeof(wire::Reject));
+  EXPECT_EQ(reply_hdr.seq, 52);
+  EXPECT_EQ(reply.order_id, 2002u);
+  EXPECT_EQ(reply.reason, 5);
+
+  ::close(fd);
+}

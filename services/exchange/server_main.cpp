@@ -19,6 +19,8 @@ namespace{
         InvalidMessage = 1,
         InvalidSide = 2,
         CancelNotFound = 3,
+        InvalidQuantity = 4,
+        InvalidPrice = 5,
     };
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -194,6 +196,14 @@ namespace{
 
         if(msg.side > static_cast<uint8_t>(hft::Side::Sell)){
             return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidSide);
+        }
+
+        if (msg.qty <= 0) {
+            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidQuantity);
+        }
+
+        if (msg.price <= 0) {
+            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidPrice);
         }
 
         hft::Order order{
