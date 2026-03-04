@@ -86,3 +86,27 @@ TEST(Exchange, CrossingOrderMatchesAcrossMultiplePriceLevels) {
   ASSERT_TRUE(top.best_ask.has_value());
   EXPECT_EQ(*top.best_ask, 103);
 }
+
+TEST(Exchange, SellOrderMatchesAcrossMultipleBidLevels) {
+  Exchange ex;
+
+  ex.add_order(Order{.order_id=30, .side=Side::Buy, .price=103, .qty=2});
+  ex.add_order(Order{.order_id=31, .side=Side::Buy, .price=101, .qty=4});
+  ex.add_order(Order{.order_id=32, .side=Side::Buy, .price=99, .qty=6});
+
+  auto fills = ex.add_order(Order{.order_id=40, .side=Side::Sell, .price=101, .qty=8});
+
+  ASSERT_EQ(fills.size(), 2u);
+  EXPECT_EQ(fills[0].maker_order_id, 30u);
+  EXPECT_EQ(fills[0].price, 103);
+  EXPECT_EQ(fills[0].qty, 2);
+  EXPECT_EQ(fills[1].maker_order_id, 31u);
+  EXPECT_EQ(fills[1].price, 101);
+  EXPECT_EQ(fills[1].qty, 4);
+
+  auto top = ex.top();
+  ASSERT_TRUE(top.best_ask.has_value());
+  EXPECT_EQ(*top.best_ask, 101);
+  ASSERT_TRUE(top.best_bid.has_value());
+  EXPECT_EQ(*top.best_bid, 99);
+}

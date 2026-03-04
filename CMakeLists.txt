@@ -27,6 +27,14 @@ add_executable(exchange_server
 target_include_directories(exchange_server PRIVATE include)
 target_link_libraries(exchange_server PRIVATE protocol)
 
+# OMS service
+add_executable(oms_sim
+  services/oms/oms_main.cpp
+  services/oms/oms.cpp
+)
+target_include_directories(oms_sim PRIVATE include)
+target_link_libraries(oms_sim PRIVATE protocol)
+
 #Tests
 include(FetchContent)
 FetchContent_Declare(
@@ -45,6 +53,13 @@ add_executable(exchange_tests
 target_include_directories(exchange_tests PRIVATE include)
 target_link_libraries(exchange_tests PRIVATE GTest::gtest_main protocol)
 
+add_executable(oms_tests
+  tests/test_oms.cpp
+  services/oms/oms.cpp
+)
+target_include_directories(oms_tests PRIVATE include)
+target_link_libraries(oms_tests PRIVATE GTest::gtest_main protocol)
+
 add_executable(server_integration_tests
   tests/test_server_integration.cpp
 )
@@ -57,4 +72,5 @@ target_link_libraries(server_integration_tests PRIVATE GTest::gtest_main protoco
 
 include(GoogleTest)
 gtest_discover_tests(exchange_tests)
+gtest_discover_tests(oms_tests)
 gtest_discover_tests(server_integration_tests)
