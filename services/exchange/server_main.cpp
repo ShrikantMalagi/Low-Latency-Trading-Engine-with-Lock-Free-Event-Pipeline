@@ -1,6 +1,7 @@
 #include "exchange.hpp"
 #include "wire.hpp"
 #include "error.hpp"
+#include "order_coordinator.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -23,6 +24,20 @@ namespace{
         InvalidPrice = 5,
         DuplicateOrderId = 6,
     };
+
+    RejectReason to_wire_reject_reason(hft::ExecRejectReason reason) {
+        switch (reason) {
+            case hft::ExecRejectReason::DuplicateOrderId:
+            return RejectReason::DuplicateOrderId;
+            case hft::ExecRejectReason::UnknownOrderId:
+                return RejectReason::CancelNotFound;
+            case hft::ExecRejectReason::InvalidTransition:
+                return RejectReason::InvalidMessage;
+            case hft::ExecRejectReason::InvalidOrder:
+            default:
+                return RejectReason::InvalidMessage;
+        }
+    }
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
         int server_socket = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -191,11 +206,10 @@ namespace{
     std::expected<void, hft::Error> handle_new_order(
         int client_fd,
         uint16_t seq,
-        hft::Exchange& exchange
+        hft::OrderCoordinator& coordinator
     ) {
         wire::NewOrder msg{};
 
-        
         if(auto result = read_exact(client_fd, &msg, sizeof(msg)); !result.has_value()){
             return result;
         }
@@ -210,11 +224,7 @@ namespace{
 
         if (msg.price <= 0) {
             return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidPrice);
-        }
-
-        if (exchange.has_order(msg.order_id)) {
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::DuplicateOrderId);
-        }        
+        }     
 
         hft::Order order{
             .order_id = msg.order_id,
@@ -222,16 +232,29 @@ namespace{
             .price = msg.price,
             .qty = msg.qty,
         };
-        
-        auto fills = exchange.add_order(order);
-
-        if (auto result = send_ack(client_fd, seq, order.order_id); !result.has_value()){
-            return result;
+    
+        auto exec = coordinator.submit_new(order);
+        if (!exec) {
+            const auto& rej = exec.error();
+            return send_reject(
+                client_fd,
+                seq,
+                rej.order_id,
+                to_wire_reject_reason(rej.reason)
+            );
         }
-
-        for (const auto& fill : fills) {
-            if (auto result = send_fill(client_fd, seq, fill); !result) {
-                return result;
+    
+        const auto& response = *exec;
+    
+        if (response.ack) {
+            if (auto ack = send_ack(client_fd, seq, order.order_id); !ack) {
+                return ack;
+            }
+        }
+    
+        for (const auto& f : response.fills) {
+            if (auto sf = send_fill(client_fd, seq, f); !sf) {
+                return sf;
             }
         }
     
@@ -241,21 +264,33 @@ namespace{
     std::expected<void, hft::Error> handle_cancel(
         int client_fd,
         uint16_t seq,
-        hft::Exchange& exchange
+        hft::OrderCoordinator& coordinator
     ) {
         wire::Cancel msg{};
         if (auto result = read_exact(client_fd, &msg, sizeof(msg)); !result) {
             return result;
         }
     
-        if (exchange.cancel(msg.order_id)) {
+        auto exec = coordinator.submit_cancel(msg.order_id);
+        if (!exec) {
+            const auto& rej = exec.error();
+            return send_reject(
+                client_fd,
+                seq,
+                rej.order_id,
+                to_wire_reject_reason(rej.reason)
+            );
+        }
+
+        const auto& response = *exec;
+        if (response.ack) {
             return send_ack(client_fd, seq, msg.order_id);
         }
-    
-        return send_reject(client_fd, seq, msg.order_id, RejectReason::CancelNotFound);
+
+        return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidMessage);
     }
     
-    std::expected<void, hft::Error> handle_client(int client_fd, hft::Exchange& exchange) {
+    std::expected<void, hft::Error> handle_client(int client_fd, hft::OrderCoordinator& coordinator) {
         while (true) {
             wire::Header header{};
             if (auto result = read_exact(client_fd, &header, sizeof(header)); !result) {
@@ -270,7 +305,7 @@ namespace{
                         return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
                     }
     
-                    if (auto result = handle_new_order(client_fd, header.seq, exchange); !result) {
+                    if (auto result = handle_new_order(client_fd, header.seq, coordinator); !result) {
                         return result;
                     }
                     break;
@@ -280,7 +315,7 @@ namespace{
                         return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
                     }
     
-                    if (auto result = handle_cancel(client_fd, header.seq, exchange); !result) {
+                    if (auto result = handle_cancel(client_fd, header.seq, coordinator); !result) {
                         return result;
                     }
                     break;
@@ -308,7 +343,6 @@ namespace{
 
 int main()
 {   
-
     constexpr int port = 9000;
 
     auto listen_result = make_listen_socket(port);
@@ -319,6 +353,8 @@ int main()
 
     int listen_fd = *listen_result;
     hft::Exchange exchange;
+    hft::Oms oms;
+    hft::OrderCoordinator coordinator(oms, exchange);
     
     while (true) {
         auto client_result = accept_client(listen_fd);
@@ -329,7 +365,7 @@ int main()
     
         int client_fd = *client_result;
     
-        auto session_result = handle_client(client_fd, exchange);
+        auto session_result = handle_client(client_fd, coordinator);
         if (!session_result && session_result.error().code != hft::ErrorCode::PeerClosed) {
             print_error(session_result.error(), "client");
         }

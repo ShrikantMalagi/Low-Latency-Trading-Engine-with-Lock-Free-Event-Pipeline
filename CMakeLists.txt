@@ -23,6 +23,8 @@ target_link_libraries(exchange_sim PRIVATE protocol)
 add_executable(exchange_server
   services/exchange/server_main.cpp
   services/exchange/exchange.cpp
+  services/coordination/order_coordinator.cpp
+  services/oms/oms.cpp
 )
 target_include_directories(exchange_server PRIVATE include)
 target_link_libraries(exchange_server PRIVATE protocol)
@@ -60,6 +62,15 @@ add_executable(oms_tests
 target_include_directories(oms_tests PRIVATE include)
 target_link_libraries(oms_tests PRIVATE GTest::gtest_main protocol)
 
+add_executable(order_coordinator_tests
+  tests/test_order_coordinator.cpp
+  services/coordination/order_coordinator.cpp
+  services/oms/oms.cpp
+  services/exchange/exchange.cpp
+)
+target_include_directories(order_coordinator_tests PRIVATE include)
+target_link_libraries(order_coordinator_tests PRIVATE GTest::gtest_main protocol)
+
 add_executable(server_integration_tests
   tests/test_server_integration.cpp
 )
@@ -73,4 +84,5 @@ target_link_libraries(server_integration_tests PRIVATE GTest::gtest_main protoco
 include(GoogleTest)
 gtest_discover_tests(exchange_tests)
 gtest_discover_tests(oms_tests)
+gtest_discover_tests(order_coordinator_tests)
 gtest_discover_tests(server_integration_tests)
