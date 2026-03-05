@@ -26,7 +26,6 @@ struct ExecReject {
 struct ExecResponse {
   bool ack{false};
   std::vector<Fill> fills;
-  std::optional<ExecReject> reject;
 };
 
 class OrderCoordinator {

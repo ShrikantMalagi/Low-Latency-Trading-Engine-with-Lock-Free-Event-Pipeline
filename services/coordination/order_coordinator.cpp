@@ -4,6 +4,14 @@
 
 namespace hft {
 
+    ExecRejectReason map_oms_error(OmsErrorCode code) {
+      switch (code) {
+        case OmsErrorCode::DuplicateOrderId: return ExecRejectReason::DuplicateOrderId;
+        case OmsErrorCode::UnknownOrderId:   return ExecRejectReason::UnknownOrderId;
+        default:                             return ExecRejectReason::InvalidTransition;
+      }
+    }
+
     std::expected<ExecResponse, ExecReject> OrderCoordinator::submit_new(Order order) {
 
         if (order.qty <= 0 || order.price <= 0) {
@@ -17,9 +25,7 @@ namespace hft {
         if (auto r = oms.submit_new(order); !r) {
           return std::unexpected(ExecReject{
               .order_id = order.order_id,
-              .reason = (r.error().code == OmsErrorCode::DuplicateOrderId)
-                            ? ExecRejectReason::DuplicateOrderId
-                            : ExecRejectReason::InvalidTransition,
+              .reason = map_oms_error(r.error().code),
               .message = r.error().message,
           });
         }
@@ -29,26 +35,38 @@ namespace hft {
         if (auto ack = oms.on_new_ack(order.order_id); !ack) {
           return std::unexpected(ExecReject{
               .order_id = order.order_id,
-              .reason = ExecRejectReason::InvalidTransition,
+              .reason = map_oms_error(ack.error().code),
               .message = ack.error().message,
           });
         }
       
         for (const auto& f : fills) {
-          auto upd = oms.on_fill(f.taker_order_id, f.price, f.qty);
-          if (!upd) {
-            return std::unexpected(ExecReject{
-                .order_id = f.taker_order_id,
-                .reason = ExecRejectReason::InvalidTransition,
-                .message = upd.error().message,
-            });
+          if (auto taker_rec = oms.get(f.taker_order_id); taker_rec.has_value()) {
+            auto r = oms.on_fill(f.taker_order_id, f.price, f.qty);
+            if (!r) {
+              return std::unexpected(ExecReject{
+                  .order_id = f.taker_order_id,
+                  .reason = map_oms_error(r.error().code),
+                  .message = r.error().message,
+              });
+            }
+          }
+        
+          if (auto maker_rec = oms.get(f.maker_order_id); maker_rec.has_value()) {
+            auto r = oms.on_fill(f.maker_order_id, f.price, f.qty);
+            if (!r) {
+              return std::unexpected(ExecReject{
+                .order_id = f.maker_order_id,
+                .reason = map_oms_error(r.error().code),
+                .message = r.error().message,
+              });
+            }
           }
         }
-      
+
         return ExecResponse{
             .ack = true,
             .fills = std::move(fills),
-            .reject = std::nullopt,
         };
       }
 
@@ -57,9 +75,7 @@ namespace hft {
         if (auto r = oms.submit_cancel(order_id); !r) {
           return std::unexpected(ExecReject{
               .order_id = order_id,
-              .reason = (r.error().code == OmsErrorCode::UnknownOrderId)
-                            ? ExecRejectReason::UnknownOrderId
-                            : ExecRejectReason::InvalidTransition,
+              .reason = map_oms_error(r.error().code),
               .message = r.error().message,
           });
         }
@@ -70,7 +86,7 @@ namespace hft {
           if (auto ack = oms.on_cancel_ack(order_id); !ack) {
             return std::unexpected(ExecReject{
                 .order_id = order_id,
-                .reason = ExecRejectReason::InvalidTransition,
+                .reason = map_oms_error(ack.error().code),
                 .message = ack.error().message,
             });
           }
@@ -78,14 +94,13 @@ namespace hft {
           return ExecResponse{
               .ack = true,
               .fills = {},
-              .reject = std::nullopt,
           };
         }
       
         if (auto rej = oms.on_cancel_reject(order_id); !rej) {
           return std::unexpected(ExecReject{
               .order_id = order_id,
-              .reason = ExecRejectReason::InvalidTransition,
+              .reason = map_oms_error(rej.error().code),
               .message = rej.error().message,
           });
         }
@@ -95,7 +110,5 @@ namespace hft {
             .reason = ExecRejectReason::UnknownOrderId,
             .message = "cancel not found on exchange",
         });
-      }
-      
-    
+      }   
 }

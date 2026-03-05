@@ -566,3 +566,57 @@ TEST_F(ServerFixture, OrderIdCanBeReusedAfterCancel) {
 
   ::close(fd);
 }
+
+TEST_F(ServerFixture, DuplicateOrderIdStillRejectsAfterCoordinatorIntegration) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header first_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 81,
+  };
+  const wire::NewOrder first_msg{
+      .order_id = 8101,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd, &first_hdr, sizeof(first_hdr)));
+  ASSERT_TRUE(write_all(fd, &first_msg, sizeof(first_msg)));
+
+  wire::Header ack_hdr{};
+  wire::Ack ack{};
+  ASSERT_TRUE(read_exact(fd, &ack_hdr, sizeof(ack_hdr)));
+  ASSERT_TRUE(read_exact(fd, &ack, sizeof(ack)));
+  ASSERT_EQ(ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(ack.order_id, 8101u);
+
+  const wire::Header second_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 82,
+  };
+  const wire::NewOrder second_msg{
+      .order_id = 8101,
+      .side = 1,
+      .price = 101,
+      .qty = 3,
+  };
+
+  ASSERT_TRUE(write_all(fd, &second_hdr, sizeof(second_hdr)));
+  ASSERT_TRUE(write_all(fd, &second_msg, sizeof(second_msg)));
+
+  wire::Header rej_hdr{};
+  wire::Reject rej{};
+  ASSERT_TRUE(read_exact(fd, &rej_hdr, sizeof(rej_hdr)));
+  ASSERT_TRUE(read_exact(fd, &rej, sizeof(rej)));
+
+  EXPECT_EQ(rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(rej_hdr.seq, 82);
+  EXPECT_EQ(rej.order_id, 8101u);
+  EXPECT_EQ(rej.reason, 6);
+
+  ::close(fd);
+}

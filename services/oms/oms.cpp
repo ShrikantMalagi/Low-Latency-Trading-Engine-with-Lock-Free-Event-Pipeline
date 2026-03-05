@@ -4,11 +4,21 @@
 
 namespace hft {
   std::expected<void, OmsError> Oms::submit_new(Order order){
-    if (orders.contains(order.order_id)) {
-        return std::unexpected(OmsError{
-            .code = OmsErrorCode::DuplicateOrderId,
-            .message = "order id already tracked",
-        });
+    if (auto it = orders.find(order.order_id); it != orders.end()) {
+        const auto status = it->second.status;
+        const bool is_terminal =
+            status == OrderStatus::Filled ||
+            status == OrderStatus::Canceled ||
+            status == OrderStatus::Rejected;
+
+        if (!is_terminal) {
+            return std::unexpected(OmsError{
+                .code = OmsErrorCode::DuplicateOrderId,
+                .message = "order id already tracked",
+            });
+        }
+
+        orders.erase(it);
     }
 
     orders.emplace(order.order_id, OrderRecord{
