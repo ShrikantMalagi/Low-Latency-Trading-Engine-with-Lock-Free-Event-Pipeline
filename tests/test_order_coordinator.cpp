@@ -24,7 +24,15 @@ Order MakeSell(uint64_t order_id, int64_t price, int64_t qty) {
   };
 }
 
-}  // namespace
+struct RecordingSink : CoordinatorEventSink {
+  std::vector<CoordinatorEvent> events;
+
+  void on_event(const CoordinatorEvent& event) override {
+    events.push_back(event);
+  }
+};
+
+}
 
 TEST(OrderCoordinator, SubmitNewRejectsInvalidOrder) {
   Oms oms;
@@ -162,4 +170,77 @@ TEST(OrderCoordinator, SubmitNewWithTrackedMakerUpdatesBothOmsRecords) {
   EXPECT_EQ(taker->status, OrderStatus::Filled);
   EXPECT_EQ(taker->filled_qty, 5);
   EXPECT_EQ(taker->remaining_qty, 0);
+}
+
+TEST(OrderCoordinator, InvalidNewOrderEmitsNewRejectedEvent) {
+  Oms oms;
+  Exchange exchange;
+  RecordingSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  auto result = coordinator.submit_new(MakeBuy(9001, 100, 0));
+  ASSERT_FALSE(result.has_value());
+
+  ASSERT_EQ(sink.events.size(), 1u);
+  EXPECT_EQ(sink.events[0].type, CoordinatorEventType::NewRejected);
+  EXPECT_EQ(sink.events[0].order_id, 9001u);
+  ASSERT_TRUE(sink.events[0].reject_reason.has_value());
+  EXPECT_EQ(*sink.events[0].reject_reason, ExecRejectReason::InvalidOrder);
+}
+
+TEST(OrderCoordinator, CrossingFlowEmitsAcceptedThenFillEvents) {
+  Oms oms;
+  Exchange exchange;
+  RecordingSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  ASSERT_TRUE(coordinator.submit_new(MakeSell(9002, 101, 4)).has_value());
+  ASSERT_TRUE(coordinator.submit_new(MakeBuy(9003, 105, 4)).has_value());
+
+  ASSERT_EQ(sink.events.size(), 3u);
+  EXPECT_EQ(sink.events[0].type, CoordinatorEventType::NewAccepted);
+  EXPECT_EQ(sink.events[0].order_id, 9002u);
+  EXPECT_EQ(sink.events[1].type, CoordinatorEventType::NewAccepted);
+  EXPECT_EQ(sink.events[1].order_id, 9003u);
+  EXPECT_EQ(sink.events[2].type, CoordinatorEventType::FillEmitted);
+  EXPECT_EQ(sink.events[2].order_id, 9003u);
+  ASSERT_TRUE(sink.events[2].contra_order_id.has_value());
+  EXPECT_EQ(*sink.events[2].contra_order_id, 9002u);
+  ASSERT_TRUE(sink.events[2].price.has_value());
+  EXPECT_EQ(*sink.events[2].price, 101);
+  ASSERT_TRUE(sink.events[2].qty.has_value());
+  EXPECT_EQ(*sink.events[2].qty, 4);
+}
+
+TEST(OrderCoordinator, CancelSuccessEmitsCancelAcceptedEvent) {
+  Oms oms;
+  Exchange exchange;
+  RecordingSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  ASSERT_TRUE(coordinator.submit_new(MakeBuy(9004, 100, 5)).has_value());
+  ASSERT_TRUE(coordinator.submit_cancel(9004).has_value());
+
+  ASSERT_GE(sink.events.size(), 2u);
+  EXPECT_EQ(sink.events.back().type, CoordinatorEventType::CancelAccepted);
+  EXPECT_EQ(sink.events.back().order_id, 9004u);
+}
+
+TEST(OrderCoordinator, CancelNotFoundEmitsCancelRejectedEvent) {
+  Oms oms;
+  Exchange exchange;
+  RecordingSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  ASSERT_TRUE(coordinator.submit_new(MakeBuy(9005, 100, 6)).has_value());
+  ASSERT_TRUE(exchange.cancel(9005));
+
+  auto cancel_result = coordinator.submit_cancel(9005);
+  ASSERT_FALSE(cancel_result.has_value());
+
+  ASSERT_GE(sink.events.size(), 2u);
+  EXPECT_EQ(sink.events.back().type, CoordinatorEventType::CancelRejected);
+  EXPECT_EQ(sink.events.back().order_id, 9005u);
+  ASSERT_TRUE(sink.events.back().reject_reason.has_value());
+  EXPECT_EQ(*sink.events.back().reject_reason, ExecRejectReason::UnknownOrderId);
 }

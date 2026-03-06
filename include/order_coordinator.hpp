@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -28,18 +29,50 @@ struct ExecResponse {
   std::vector<Fill> fills;
 };
 
+enum class CoordinatorEventType : uint8_t {
+  NewAccepted,
+  NewRejected,
+  FillEmitted,
+  CancelAccepted,
+  CancelRejected,
+  InternalError,
+};
+
+struct CoordinatorEvent {
+  CoordinatorEventType type{};
+  uint64_t order_id{};
+  std::optional<uint64_t> contra_order_id{std::nullopt};
+  std::optional<int64_t> price{std::nullopt};
+  std::optional<int64_t> qty{std::nullopt};
+  std::optional<ExecRejectReason> reject_reason{std::nullopt};
+  std::optional<std::string_view> message{std::nullopt};
+};
+
+struct CoordinatorEventSink {
+  virtual ~CoordinatorEventSink() = default;
+  virtual void on_event(const CoordinatorEvent& event) = 0;
+};
+
 class OrderCoordinator {
 public:
-  OrderCoordinator(Oms& oms_ref, Exchange& exchange_ref)
-      : oms(oms_ref), exchange(exchange_ref) {}
+  OrderCoordinator(Oms& oms_ref, Exchange& exchange_ref, CoordinatorEventSink* sink_ref = nullptr)
+      : oms(oms_ref), exchange(exchange_ref), sink(sink_ref) {}
 
   std::expected<ExecResponse, ExecReject> submit_new(Order order);
 
   std::expected<ExecResponse, ExecReject> submit_cancel(uint64_t order_id);
 
 private:
+
+  void emit(const CoordinatorEvent& event){
+    if(sink != nullptr){
+      sink->on_event(event);
+    }
+  }
+
   Oms& oms;
   Exchange& exchange;
+  CoordinatorEventSink* sink;
 };
 
 }
