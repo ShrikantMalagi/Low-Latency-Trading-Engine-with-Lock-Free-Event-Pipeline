@@ -26,6 +26,7 @@ namespace hft {
             .type = CoordinatorEventType::NewRejected,
             .order_id = order.order_id,
             .reject_reason = rej.reason,
+            .message = rej.message,
           });
           return std::unexpected(rej);
         }
@@ -40,6 +41,7 @@ namespace hft {
             .type = CoordinatorEventType::NewRejected,
             .order_id = order.order_id,
             .reject_reason = rej.reason,
+            .message = rej.message,
           });
           return std::unexpected(rej);
         }
@@ -130,6 +132,7 @@ namespace hft {
             .type = CoordinatorEventType::CancelRejected,
             .order_id = order_id,
             .reject_reason = rej.reason,
+            .message = rej.message,
           });
           return std::unexpected(rej);
         }
@@ -187,6 +190,7 @@ namespace hft {
           .type = CoordinatorEventType::CancelRejected,
           .order_id = order_id,
           .reject_reason = rej.reason,
+          .message = rej.message,
         });
         return std::unexpected(rej);
       }   

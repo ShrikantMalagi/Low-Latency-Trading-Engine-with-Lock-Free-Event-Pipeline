@@ -244,3 +244,32 @@ TEST(OrderCoordinator, CancelNotFoundEmitsCancelRejectedEvent) {
   ASSERT_TRUE(sink.events.back().reject_reason.has_value());
   EXPECT_EQ(*sink.events.back().reject_reason, ExecRejectReason::UnknownOrderId);
 }
+
+TEST(OrderCoordinator, InternalErrorEmittedWhenMakerFillTransitionFails) {
+  Oms oms;
+  Exchange exchange;
+  RecordingSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  const Order maker = MakeSell(9101, 101, 3);
+  const Order taker = MakeBuy(9102, 105, 3);
+
+  // Intentionally desync OMS and Exchange:
+  // maker stays on the exchange book, but OMS marks it PendingCancel.
+  ASSERT_TRUE(exchange.add_order(maker).empty());
+  ASSERT_TRUE(oms.submit_new(maker).has_value());
+  ASSERT_TRUE(oms.on_new_ack(maker.order_id).has_value());
+  ASSERT_TRUE(oms.submit_cancel(maker.order_id).has_value());
+
+  auto result = coordinator.submit_new(taker);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().order_id, maker.order_id);
+  EXPECT_EQ(result.error().reason, ExecRejectReason::InvalidTransition);
+
+  ASSERT_GE(sink.events.size(), 2u);
+  EXPECT_EQ(sink.events.back().type, CoordinatorEventType::InternalError);
+  EXPECT_EQ(sink.events.back().order_id, maker.order_id);
+  ASSERT_TRUE(sink.events.back().reject_reason.has_value());
+  EXPECT_EQ(*sink.events.back().reject_reason, ExecRejectReason::InvalidTransition);
+  ASSERT_TRUE(sink.events.back().message.has_value());
+}

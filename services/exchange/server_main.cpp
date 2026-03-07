@@ -2,6 +2,7 @@
 #include "wire.hpp"
 #include "error.hpp"
 #include "order_coordinator.hpp"
+#include "coordinator_event_sink.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -354,7 +355,9 @@ int main()
     int listen_fd = *listen_result;
     hft::Exchange exchange;
     hft::Oms oms;
-    hft::OrderCoordinator coordinator(oms, exchange);
+    hft::LoggingEventSink event_sink;
+    hft::OrderCoordinator coordinator(oms, exchange, &event_sink);
+
     
     while (true) {
         auto client_result = accept_client(listen_fd);

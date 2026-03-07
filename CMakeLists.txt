@@ -24,6 +24,7 @@ add_executable(exchange_server
   services/exchange/server_main.cpp
   services/exchange/exchange.cpp
   services/coordination/order_coordinator.cpp
+  services/coordination/coordinator_event_sink.cpp
   services/oms/oms.cpp
 )
 target_include_directories(exchange_server PRIVATE include)
