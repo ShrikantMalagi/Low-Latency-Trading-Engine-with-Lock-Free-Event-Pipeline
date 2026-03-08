@@ -20,12 +20,14 @@ add_executable(exchange_sim
 target_include_directories(exchange_sim PRIVATE include)
 target_link_libraries(exchange_sim PRIVATE protocol)
 
-add_executable(exchange_server
+add_executable(exchange_server)
+target_sources(exchange_server PRIVATE
   services/exchange/server_main.cpp
   services/exchange/exchange.cpp
+  services/oms/oms.cpp
   services/coordination/order_coordinator.cpp
   services/coordination/coordinator_event_sink.cpp
-  services/oms/oms.cpp
+  services/coordination/coordinator_metrics.cpp
 )
 target_include_directories(exchange_server PRIVATE include)
 target_link_libraries(exchange_server PRIVATE protocol)
@@ -66,11 +68,20 @@ target_link_libraries(oms_tests PRIVATE GTest::gtest_main protocol)
 add_executable(order_coordinator_tests
   tests/test_order_coordinator.cpp
   services/coordination/order_coordinator.cpp
+  services/coordination/coordinator_event_sink.cpp
   services/oms/oms.cpp
   services/exchange/exchange.cpp
 )
 target_include_directories(order_coordinator_tests PRIVATE include)
 target_link_libraries(order_coordinator_tests PRIVATE GTest::gtest_main protocol)
+
+add_executable(coordinator_metrics_tests
+  tests/test_coordinator_metrics.cpp
+  services/coordination/coordinator_metrics.cpp
+  services/coordination/coordinator_event_sink.cpp
+)
+target_include_directories(coordinator_metrics_tests PRIVATE include)
+target_link_libraries(coordinator_metrics_tests PRIVATE GTest::gtest_main protocol)
 
 add_executable(server_integration_tests
   tests/test_server_integration.cpp
@@ -86,4 +97,5 @@ include(GoogleTest)
 gtest_discover_tests(exchange_tests)
 gtest_discover_tests(oms_tests)
 gtest_discover_tests(order_coordinator_tests)
+gtest_discover_tests(coordinator_metrics_tests)
 gtest_discover_tests(server_integration_tests)

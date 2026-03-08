@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -94,14 +95,27 @@ int connect_to_server() {
 class ServerFixture : public ::testing::Test {
 protected:
   void SetUp() override {
+    ASSERT_EQ(::pipe(server_stdout_pipe_), 0) << "pipe failed: " << std::strerror(errno);
+
     server_pid_ = ::fork();
     ASSERT_GE(server_pid_, 0) << "fork failed: " << std::strerror(errno);
 
     if (server_pid_ == 0) {
+      ::close(server_stdout_pipe_[0]);
+      ::dup2(server_stdout_pipe_[1], STDOUT_FILENO);
+      ::dup2(server_stdout_pipe_[1], STDERR_FILENO);
+      ::close(server_stdout_pipe_[1]);
       ::execl(EXCHANGE_SERVER_PATH, EXCHANGE_SERVER_PATH, static_cast<char*>(nullptr));
       std::perror("execl");
       _exit(127);
     }
+
+    ::close(server_stdout_pipe_[1]);
+    server_stdout_pipe_[1] = -1;
+
+    const int flags = ::fcntl(server_stdout_pipe_[0], F_GETFL, 0);
+    ASSERT_NE(flags, -1);
+    ASSERT_NE(::fcntl(server_stdout_pipe_[0], F_SETFL, flags | O_NONBLOCK), -1);
 
     bool connected = false;
     for (int i = 0; i < 50; ++i) {
@@ -123,6 +137,11 @@ protected:
       int status = 0;
       ::waitpid(server_pid_, &status, 0);
     }
+    DrainServerOutput();
+    if (server_stdout_pipe_[0] >= 0) {
+      ::close(server_stdout_pipe_[0]);
+      server_stdout_pipe_[0] = -1;
+    }
   }
 
   int OpenClient() {
@@ -131,8 +150,52 @@ protected:
     return fd;
   }
 
+  bool WaitForServerOutputContains(
+      std::string_view needle,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(1000)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      DrainServerOutput();
+      if (server_output_.find(needle) != std::string::npos) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    DrainServerOutput();
+    return server_output_.find(needle) != std::string::npos;
+  }
+
+  const std::string& server_output() const { return server_output_; }
+
 private:
+  void DrainServerOutput() {
+    if (server_stdout_pipe_[0] < 0) {
+      return;
+    }
+
+    char buf[1024];
+    while (true) {
+      const ssize_t n = ::read(server_stdout_pipe_[0], buf, sizeof(buf));
+      if (n > 0) {
+        server_output_.append(buf, static_cast<size_t>(n));
+        continue;
+      }
+      if (n == 0) {
+        break;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+      break;
+    }
+  }
+
   pid_t server_pid_ = -1;
+  int server_stdout_pipe_[2]{-1, -1};
+  std::string server_output_;
 };
 
 } 
@@ -619,4 +682,79 @@ TEST_F(ServerFixture, DuplicateOrderIdStillRejectsAfterCoordinatorIntegration) {
   EXPECT_EQ(rej.reason, 6);
 
   ::close(fd);
+}
+
+TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
+  const int fd = OpenClient();
+  ASSERT_GE(fd, 0);
+
+  const wire::Header new_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 91,
+  };
+  const wire::NewOrder first_new{
+      .order_id = 9901,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd, &first_new, sizeof(first_new)));
+
+  wire::Header ack_hdr{};
+  wire::Ack ack{};
+  ASSERT_TRUE(read_exact(fd, &ack_hdr, sizeof(ack_hdr)));
+  ASSERT_TRUE(read_exact(fd, &ack, sizeof(ack)));
+  ASSERT_EQ(ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(ack.order_id, 9901u);
+
+  const wire::Header dup_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 92,
+  };
+  const wire::NewOrder dup_new{
+      .order_id = 9901,
+      .side = 1,
+      .price = 101,
+      .qty = 2,
+  };
+
+  ASSERT_TRUE(write_all(fd, &dup_hdr, sizeof(dup_hdr)));
+  ASSERT_TRUE(write_all(fd, &dup_new, sizeof(dup_new)));
+
+  wire::Header dup_rej_hdr{};
+  wire::Reject dup_rej{};
+  ASSERT_TRUE(read_exact(fd, &dup_rej_hdr, sizeof(dup_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd, &dup_rej, sizeof(dup_rej)));
+  ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  ASSERT_EQ(dup_rej.reason, 6);
+
+  const wire::Header cancel_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::Cancel),
+      .length = static_cast<uint16_t>(sizeof(wire::Cancel)),
+      .seq = 93,
+  };
+  const wire::Cancel cancel_msg{
+      .order_id = 999999,
+  };
+
+  ASSERT_TRUE(write_all(fd, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd, &cancel_msg, sizeof(cancel_msg)));
+
+  wire::Header cancel_rej_hdr{};
+  wire::Reject cancel_rej{};
+  ASSERT_TRUE(read_exact(fd, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd, &cancel_rej, sizeof(cancel_rej)));
+  ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  ASSERT_EQ(cancel_rej.reason, 3);
+
+  ::close(fd);
+
+  EXPECT_TRUE(WaitForServerOutputContains("new_rej=1")) << server_output();
+  EXPECT_TRUE(WaitForServerOutputContains("cancel_rej=1")) << server_output();
+  EXPECT_TRUE(WaitForServerOutputContains("rej_dup_id=1")) << server_output();
+  EXPECT_TRUE(WaitForServerOutputContains("rej_unknown_id=1")) << server_output();
 }

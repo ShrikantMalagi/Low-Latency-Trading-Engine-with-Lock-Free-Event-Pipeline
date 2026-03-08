@@ -1,4 +1,5 @@
 #include "order_coordinator.hpp"
+#include "coordinator_event_sink.hpp"
 
 #include <gtest/gtest.h>
 
@@ -272,4 +273,131 @@ TEST(OrderCoordinator, InternalErrorEmittedWhenMakerFillTransitionFails) {
   ASSERT_TRUE(sink.events.back().reject_reason.has_value());
   EXPECT_EQ(*sink.events.back().reject_reason, ExecRejectReason::InvalidTransition);
   ASSERT_TRUE(sink.events.back().message.has_value());
+}
+
+TEST(OrderCoordinator, QueueSinkCapturesAcceptedEvent) {
+  Oms oms;
+  Exchange exchange;
+  QueueEventSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  auto result = coordinator.submit_new(MakeBuy(9201, 100, 2));
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(sink.size(), 1u);
+
+  auto event = sink.try_pop();
+  ASSERT_TRUE(event.has_value());
+  EXPECT_EQ(event->event.type, CoordinatorEventType::NewAccepted);
+  EXPECT_EQ(event->event.order_id, 9201u);
+  EXPECT_EQ(sink.size(), 0u);
+}
+
+TEST(OrderCoordinator, QueueSinkPreservesCrossingEventOrder) {
+  Oms oms;
+  Exchange exchange;
+  QueueEventSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  ASSERT_TRUE(coordinator.submit_new(MakeSell(9202, 101, 3)).has_value());
+  ASSERT_TRUE(coordinator.submit_new(MakeBuy(9203, 105, 3)).has_value());
+
+  auto e1 = sink.try_pop();
+  auto e2 = sink.try_pop();
+  auto e3 = sink.try_pop();
+  auto e4 = sink.try_pop();
+
+  ASSERT_TRUE(e1.has_value());
+  ASSERT_TRUE(e2.has_value());
+  ASSERT_TRUE(e3.has_value());
+  ASSERT_FALSE(e4.has_value());
+
+  EXPECT_EQ(e1->event.type, CoordinatorEventType::NewAccepted);
+  EXPECT_EQ(e1->event.order_id, 9202u);
+  EXPECT_EQ(e2->event.type, CoordinatorEventType::NewAccepted);
+  EXPECT_EQ(e2->event.order_id, 9203u);
+  EXPECT_EQ(e3->event.type, CoordinatorEventType::FillEmitted);
+  EXPECT_EQ(e3->event.order_id, 9203u);
+  ASSERT_TRUE(e3->event.contra_order_id.has_value());
+  EXPECT_EQ(*e3->event.contra_order_id, 9202u);
+}
+
+TEST(OrderCoordinator, QueueSinkTryPopReturnsEmptyWhenNoEvents) {
+  QueueEventSink sink;
+  auto event = sink.try_pop();
+  EXPECT_FALSE(event.has_value());
+}
+
+TEST(OrderCoordinator, QueueSinkEnvelopeHasMonotonicIdsAndTimestamps) {
+  Oms oms;
+  Exchange exchange;
+  QueueEventSink sink;
+  OrderCoordinator coordinator(oms, exchange, &sink);
+
+  ASSERT_TRUE(coordinator.submit_new(MakeBuy(9301, 100, 2)).has_value());
+  ASSERT_TRUE(coordinator.submit_new(MakeSell(9302, 101, 1)).has_value());
+
+  auto first = sink.try_pop();
+  auto second = sink.try_pop();
+
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+
+  EXPECT_EQ(first->source, "order_coordinator");
+  EXPECT_EQ(second->source, "order_coordinator");
+
+  EXPECT_GT(first->event_id, 0u);
+  EXPECT_GT(second->event_id, first->event_id);
+
+  EXPECT_GT(first->timestamp_ns, 0u);
+  EXPECT_GT(second->timestamp_ns, 0u);
+  EXPECT_GE(second->timestamp_ns, first->timestamp_ns);
+}
+
+TEST(OrderCoordinator, QueueSinkDropsOldestWhenMaxQueueSizeReached) {
+  QueueEventSink sink(/*max_queue_size=*/2);
+
+  sink.on_event(CoordinatorEvent{
+      .type = CoordinatorEventType::NewAccepted,
+      .order_id = 9401,
+  });
+  sink.on_event(CoordinatorEvent{
+      .type = CoordinatorEventType::NewAccepted,
+      .order_id = 9402,
+  });
+  sink.on_event(CoordinatorEvent{
+      .type = CoordinatorEventType::NewAccepted,
+      .order_id = 9403,
+  });
+
+  EXPECT_EQ(sink.max_queue_size(), 2u);
+  EXPECT_EQ(sink.size(), 2u);
+  EXPECT_EQ(sink.dropped_events(), 1u);
+
+  auto first = sink.try_pop();
+  auto second = sink.try_pop();
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(first->event.order_id, 9402u);
+  EXPECT_EQ(second->event.order_id, 9403u);
+}
+
+TEST(OrderCoordinator, QueueSinkTreatsZeroMaxQueueSizeAsOne) {
+  QueueEventSink sink(/*max_queue_size=*/0);
+  EXPECT_EQ(sink.max_queue_size(), 1u);
+
+  sink.on_event(CoordinatorEvent{
+      .type = CoordinatorEventType::NewAccepted,
+      .order_id = 9501,
+  });
+  sink.on_event(CoordinatorEvent{
+      .type = CoordinatorEventType::NewAccepted,
+      .order_id = 9502,
+  });
+
+  EXPECT_EQ(sink.size(), 1u);
+  EXPECT_EQ(sink.dropped_events(), 1u);
+
+  auto only = sink.try_pop();
+  ASSERT_TRUE(only.has_value());
+  EXPECT_EQ(only->event.order_id, 9502u);
 }

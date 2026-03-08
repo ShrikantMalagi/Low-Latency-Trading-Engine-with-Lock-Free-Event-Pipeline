@@ -53,6 +53,13 @@ struct CoordinatorEventSink {
   virtual void on_event(const CoordinatorEvent& event) = 0;
 };
 
+struct CoordinatorEventEnvelope {
+  uint64_t event_id{};
+  uint64_t timestamp_ns{};
+  std::string_view source{"order_coordinator"};
+  CoordinatorEvent event{};
+};
+
 class OrderCoordinator {
 public:
   OrderCoordinator(Oms& oms_ref, Exchange& exchange_ref, CoordinatorEventSink* sink_ref = nullptr)

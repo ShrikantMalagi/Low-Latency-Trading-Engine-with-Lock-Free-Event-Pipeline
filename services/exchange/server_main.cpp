@@ -3,6 +3,7 @@
 #include "error.hpp"
 #include "order_coordinator.hpp"
 #include "coordinator_event_sink.hpp"
+#include "coordinator_metrics.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -338,8 +339,6 @@ namespace{
             error.sys_errno ? std::strerror(error.sys_errno) : "n/a"
         );
     }
-
-
 }
 
 int main()
@@ -355,8 +354,9 @@ int main()
     int listen_fd = *listen_result;
     hft::Exchange exchange;
     hft::Oms oms;
-    hft::LoggingEventSink event_sink;
+    hft::QueueEventSink event_sink;
     hft::OrderCoordinator coordinator(oms, exchange, &event_sink);
+    hft::CoordinatorMetrics coordinator_metrics{};
 
     
     while (true) {
@@ -372,6 +372,8 @@ int main()
         if (!session_result && session_result.error().code != hft::ErrorCode::PeerClosed) {
             print_error(session_result.error(), "client");
         }
+
+        hft::drain_and_report(event_sink, coordinator_metrics);
     
         ::close(client_fd);
     }

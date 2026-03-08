@@ -1,10 +1,20 @@
 #include "coordinator_event_sink.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <string>
 
 namespace hft {
 namespace {
+
+std::atomic<uint64_t> g_next_event_id{1};
+
+uint64_t now_ns() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
 
 const char* to_string(CoordinatorEventType type) {
   switch (type) {
@@ -49,6 +59,53 @@ void LoggingEventSink::on_event(const CoordinatorEvent& event) {
       reject,
       message_len,
       message);
+}
+
+void QueueEventSink::on_event(const CoordinatorEvent& event) {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (queue.size() >= max_queue_size_) {
+    queue.pop_front();
+    ++dropped_events_;
+  }
+  queue.push_back(CoordinatorEventEnvelope{
+      .event_id = g_next_event_id.fetch_add(1, std::memory_order_relaxed),
+      .timestamp_ns = now_ns(),
+      .source = "order_coordinator",
+      .event = event,
+  });
+}
+
+std::optional<CoordinatorEventEnvelope> QueueEventSink::try_pop() {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (queue.empty()) return std::nullopt;
+  CoordinatorEventEnvelope envelope = std::move(queue.front());
+  queue.pop_front();
+  return envelope;
+}
+
+std::vector<CoordinatorEventEnvelope> QueueEventSink::snapshot() const {
+  std::lock_guard<std::mutex> lock(mutex);
+  return std::vector<CoordinatorEventEnvelope>(queue.begin(), queue.end());
+}
+
+std::size_t QueueEventSink::size() const {
+  std::lock_guard<std::mutex> lock(mutex);
+  return queue.size();
+}
+
+std::size_t QueueEventSink::dropped_events() const {
+  std::lock_guard<std::mutex> lock(mutex);
+  return dropped_events_;
+}
+
+std::size_t QueueEventSink::max_queue_size() const {
+  std::lock_guard<std::mutex> lock(mutex);
+  return max_queue_size_;
+}
+
+void QueueEventSink::clear() {
+  std::lock_guard<std::mutex> lock(mutex);
+  queue.clear();
 }
 
 }
