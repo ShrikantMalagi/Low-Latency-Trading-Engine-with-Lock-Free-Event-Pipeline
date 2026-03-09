@@ -10,8 +10,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -94,28 +92,22 @@ int connect_to_server() {
 
 class ServerFixture : public ::testing::Test {
 protected:
-  void SetUp() override {
-    ASSERT_EQ(::pipe(server_stdout_pipe_), 0) << "pipe failed: " << std::strerror(errno);
+  virtual const char* EventSinkMaxQueueArg() const { return nullptr; }
 
+  void SetUp() override {
     server_pid_ = ::fork();
     ASSERT_GE(server_pid_, 0) << "fork failed: " << std::strerror(errno);
 
     if (server_pid_ == 0) {
-      ::close(server_stdout_pipe_[0]);
-      ::dup2(server_stdout_pipe_[1], STDOUT_FILENO);
-      ::dup2(server_stdout_pipe_[1], STDERR_FILENO);
-      ::close(server_stdout_pipe_[1]);
-      ::execl(EXCHANGE_SERVER_PATH, EXCHANGE_SERVER_PATH, static_cast<char*>(nullptr));
+      const char* max_queue_arg = EventSinkMaxQueueArg();
+      if (max_queue_arg != nullptr) {
+        ::execl(EXCHANGE_SERVER_PATH, EXCHANGE_SERVER_PATH, max_queue_arg, static_cast<char*>(nullptr));
+      } else {
+        ::execl(EXCHANGE_SERVER_PATH, EXCHANGE_SERVER_PATH, static_cast<char*>(nullptr));
+      }
       std::perror("execl");
       _exit(127);
     }
-
-    ::close(server_stdout_pipe_[1]);
-    server_stdout_pipe_[1] = -1;
-
-    const int flags = ::fcntl(server_stdout_pipe_[0], F_GETFL, 0);
-    ASSERT_NE(flags, -1);
-    ASSERT_NE(::fcntl(server_stdout_pipe_[0], F_SETFL, flags | O_NONBLOCK), -1);
 
     bool connected = false;
     for (int i = 0; i < 50; ++i) {
@@ -137,11 +129,6 @@ protected:
       int status = 0;
       ::waitpid(server_pid_, &status, 0);
     }
-    DrainServerOutput();
-    if (server_stdout_pipe_[0] >= 0) {
-      ::close(server_stdout_pipe_[0]);
-      server_stdout_pipe_[0] = -1;
-    }
   }
 
   int OpenClient() {
@@ -150,52 +137,12 @@ protected:
     return fd;
   }
 
-  bool WaitForServerOutputContains(
-      std::string_view needle,
-      std::chrono::milliseconds timeout = std::chrono::milliseconds(1000)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-      DrainServerOutput();
-      if (server_output_.find(needle) != std::string::npos) {
-        return true;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    DrainServerOutput();
-    return server_output_.find(needle) != std::string::npos;
-  }
-
-  const std::string& server_output() const { return server_output_; }
-
-private:
-  void DrainServerOutput() {
-    if (server_stdout_pipe_[0] < 0) {
-      return;
-    }
-
-    char buf[1024];
-    while (true) {
-      const ssize_t n = ::read(server_stdout_pipe_[0], buf, sizeof(buf));
-      if (n > 0) {
-        server_output_.append(buf, static_cast<size_t>(n));
-        continue;
-      }
-      if (n == 0) {
-        break;
-      }
-      if (errno == EINTR) {
-        continue;
-      }
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        break;
-      }
-      break;
-    }
-  }
-
   pid_t server_pid_ = -1;
-  int server_stdout_pipe_[2]{-1, -1};
-  std::string server_output_;
+};
+
+class SmallQueueServerFixture : public ServerFixture {
+protected:
+  const char* EventSinkMaxQueueArg() const override { return "--event-sink-max-queue=2"; }
 };
 
 } 
@@ -685,8 +632,8 @@ TEST_F(ServerFixture, DuplicateOrderIdStillRejectsAfterCoordinatorIntegration) {
 }
 
 TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
-  const int fd = OpenClient();
-  ASSERT_GE(fd, 0);
+  const int fd1 = OpenClient();
+  ASSERT_GE(fd1, 0);
 
   const wire::Header new_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
@@ -699,14 +646,13 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
       .price = 100,
       .qty = 5,
   };
-
-  ASSERT_TRUE(write_all(fd, &new_hdr, sizeof(new_hdr)));
-  ASSERT_TRUE(write_all(fd, &first_new, sizeof(first_new)));
+  ASSERT_TRUE(write_all(fd1, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd1, &first_new, sizeof(first_new)));
 
   wire::Header ack_hdr{};
   wire::Ack ack{};
-  ASSERT_TRUE(read_exact(fd, &ack_hdr, sizeof(ack_hdr)));
-  ASSERT_TRUE(read_exact(fd, &ack, sizeof(ack)));
+  ASSERT_TRUE(read_exact(fd1, &ack_hdr, sizeof(ack_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &ack, sizeof(ack)));
   ASSERT_EQ(ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
   ASSERT_EQ(ack.order_id, 9901u);
 
@@ -721,14 +667,13 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
       .price = 101,
       .qty = 2,
   };
-
-  ASSERT_TRUE(write_all(fd, &dup_hdr, sizeof(dup_hdr)));
-  ASSERT_TRUE(write_all(fd, &dup_new, sizeof(dup_new)));
+  ASSERT_TRUE(write_all(fd1, &dup_hdr, sizeof(dup_hdr)));
+  ASSERT_TRUE(write_all(fd1, &dup_new, sizeof(dup_new)));
 
   wire::Header dup_rej_hdr{};
   wire::Reject dup_rej{};
-  ASSERT_TRUE(read_exact(fd, &dup_rej_hdr, sizeof(dup_rej_hdr)));
-  ASSERT_TRUE(read_exact(fd, &dup_rej, sizeof(dup_rej)));
+  ASSERT_TRUE(read_exact(fd1, &dup_rej_hdr, sizeof(dup_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   ASSERT_EQ(dup_rej.reason, 6);
 
@@ -740,21 +685,131 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   const wire::Cancel cancel_msg{
       .order_id = 999999,
   };
-
-  ASSERT_TRUE(write_all(fd, &cancel_hdr, sizeof(cancel_hdr)));
-  ASSERT_TRUE(write_all(fd, &cancel_msg, sizeof(cancel_msg)));
+  ASSERT_TRUE(write_all(fd1, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd1, &cancel_msg, sizeof(cancel_msg)));
 
   wire::Header cancel_rej_hdr{};
   wire::Reject cancel_rej{};
-  ASSERT_TRUE(read_exact(fd, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
-  ASSERT_TRUE(read_exact(fd, &cancel_rej, sizeof(cancel_rej)));
+  ASSERT_TRUE(read_exact(fd1, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &cancel_rej, sizeof(cancel_rej)));
   ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   ASSERT_EQ(cancel_rej.reason, 3);
 
-  ::close(fd);
+  ::close(fd1);
 
-  EXPECT_TRUE(WaitForServerOutputContains("new_rej=1")) << server_output();
-  EXPECT_TRUE(WaitForServerOutputContains("cancel_rej=1")) << server_output();
-  EXPECT_TRUE(WaitForServerOutputContains("rej_dup_id=1")) << server_output();
-  EXPECT_TRUE(WaitForServerOutputContains("rej_unknown_id=1")) << server_output();
+  const int fd2 = OpenClient();
+  ASSERT_GE(fd2, 0);
+
+  const wire::Header get_metrics_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::GetMetrics),
+      .length = 0,
+      .seq = 94,
+  };
+  ASSERT_TRUE(write_all(fd2, &get_metrics_hdr, sizeof(get_metrics_hdr)));
+
+  wire::Header metrics_hdr{};
+  wire::MetricsSnapshot metrics{};
+  ASSERT_TRUE(read_exact(fd2, &metrics_hdr, sizeof(metrics_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
+
+  ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
+  ASSERT_EQ(metrics_hdr.length, sizeof(wire::MetricsSnapshot));
+  ASSERT_EQ(metrics_hdr.seq, 94);
+
+  EXPECT_EQ(metrics.event_type_counts[1], 1u);
+  EXPECT_EQ(metrics.event_type_counts[4], 1u);
+  EXPECT_EQ(metrics.reject_reason_counts[1], 1u);
+  EXPECT_EQ(metrics.reject_reason_counts[2], 1u);
+
+  ::close(fd2);
+}
+
+TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
+  const int fd1 = OpenClient();
+  ASSERT_GE(fd1, 0);
+
+  const wire::Header new_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 201,
+  };
+  const wire::NewOrder first_new{
+      .order_id = 20001,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+  ASSERT_TRUE(write_all(fd1, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd1, &first_new, sizeof(first_new)));
+
+  wire::Header ack_hdr{};
+  wire::Ack ack{};
+  ASSERT_TRUE(read_exact(fd1, &ack_hdr, sizeof(ack_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &ack, sizeof(ack)));
+  ASSERT_EQ(ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(ack.order_id, 20001u);
+
+  const wire::Header dup_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 202,
+  };
+  const wire::NewOrder dup_new{
+      .order_id = 20001,
+      .side = 1,
+      .price = 101,
+      .qty = 2,
+  };
+  ASSERT_TRUE(write_all(fd1, &dup_hdr, sizeof(dup_hdr)));
+  ASSERT_TRUE(write_all(fd1, &dup_new, sizeof(dup_new)));
+
+  wire::Header dup_rej_hdr{};
+  wire::Reject dup_rej{};
+  ASSERT_TRUE(read_exact(fd1, &dup_rej_hdr, sizeof(dup_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &dup_rej, sizeof(dup_rej)));
+  ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  ASSERT_EQ(dup_rej.reason, 6);
+
+  const wire::Header cancel_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::Cancel),
+      .length = static_cast<uint16_t>(sizeof(wire::Cancel)),
+      .seq = 203,
+  };
+  const wire::Cancel cancel_msg{
+      .order_id = 888888,
+  };
+  ASSERT_TRUE(write_all(fd1, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd1, &cancel_msg, sizeof(cancel_msg)));
+
+  wire::Header cancel_rej_hdr{};
+  wire::Reject cancel_rej{};
+  ASSERT_TRUE(read_exact(fd1, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &cancel_rej, sizeof(cancel_rej)));
+  ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  ASSERT_EQ(cancel_rej.reason, 3);
+
+  ::close(fd1);
+
+  const int fd2 = OpenClient();
+  ASSERT_GE(fd2, 0);
+
+  const wire::Header get_metrics_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::GetMetrics),
+      .length = 0,
+      .seq = 204,
+  };
+  ASSERT_TRUE(write_all(fd2, &get_metrics_hdr, sizeof(get_metrics_hdr)));
+
+  wire::Header metrics_hdr{};
+  wire::MetricsSnapshot metrics{};
+  ASSERT_TRUE(read_exact(fd2, &metrics_hdr, sizeof(metrics_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
+
+  ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
+  ASSERT_EQ(metrics_hdr.length, sizeof(wire::MetricsSnapshot));
+  ASSERT_EQ(metrics_hdr.seq, 204);
+
+  EXPECT_EQ(metrics.dropped_events, 1u);
+
+  ::close(fd2);
 }

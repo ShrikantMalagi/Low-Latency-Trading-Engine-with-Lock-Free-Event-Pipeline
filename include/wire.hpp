@@ -7,7 +7,9 @@ namespace wire{
         Cancel = 2,
         Ack = 3,
         Fill = 4,
-        Reject = 5
+        Reject = 5,
+        GetMetrics = 100,
+        MetricsSnapshot = 101
     };
     
     #pragma pack(push, 1)
@@ -42,6 +44,13 @@ namespace wire{
     struct Reject {
         uint64_t order_id;
         uint16_t reason;
+    };
+
+    struct MetricsSnapshot {
+        uint64_t event_type_counts[6];
+        uint64_t reject_reason_counts[4];
+        uint64_t dropped_events;
+        uint64_t queued_events;
     };
     
     #pragma pack(pop)

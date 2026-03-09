@@ -4,6 +4,7 @@
 #include "order_coordinator.hpp"
 #include "coordinator_event_sink.hpp"
 #include "coordinator_metrics.hpp"
+#include "recovery.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -14,6 +15,8 @@
 #include <cstring>
 #include <expected>
 #include <cstdio>
+#include <cstdlib>
+#include <string_view>
 
 
 namespace{
@@ -39,6 +42,34 @@ namespace{
             default:
                 return RejectReason::InvalidMessage;
         }
+    }
+
+    std::size_t parse_event_sink_max_queue_size(int argc, char* argv[]) {
+        constexpr std::size_t kDefaultMaxQueueSize = 4096;
+        if (argc < 2 || argv == nullptr || argv[1] == nullptr) {
+            return kDefaultMaxQueueSize;
+        }
+
+        constexpr std::string_view kPrefix = "--event-sink-max-queue=";
+        std::string_view arg{argv[1]};
+        const char* raw = nullptr;
+        if (arg.starts_with(kPrefix)) {
+            raw = argv[1] + static_cast<std::ptrdiff_t>(kPrefix.size());
+        } else {
+            raw = argv[1];
+        }
+
+        if (raw[0] == '\0') {
+            return kDefaultMaxQueueSize;
+        }
+
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed == 0) {
+            return kDefaultMaxQueueSize;
+        }
+
+        return static_cast<std::size_t>(parsed);
     }
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -205,6 +236,13 @@ namespace{
         return send_frame(fd, wire::MsgType::Reject, seq, &reject, sizeof(reject));
     }
 
+    std::expected<void, hft::Error> handle_get_metrics(
+        int client_fd,
+        uint16_t seq,
+        const hft::CoordinatorMetrics& metrics,
+        const hft::QueueEventSink& event_sink
+    );
+
     std::expected<void, hft::Error> handle_new_order(
         int client_fd,
         uint16_t seq,
@@ -292,7 +330,12 @@ namespace{
         return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidMessage);
     }
     
-    std::expected<void, hft::Error> handle_client(int client_fd, hft::OrderCoordinator& coordinator) {
+    std::expected<void, hft::Error> handle_client(
+        int client_fd,
+        hft::OrderCoordinator& coordinator,
+        const hft::CoordinatorMetrics& metrics,
+        const hft::QueueEventSink& event_sink
+    ) {
         while (true) {
             wire::Header header{};
             if (auto result = read_exact(client_fd, &header, sizeof(header)); !result) {
@@ -321,6 +364,15 @@ namespace{
                         return result;
                     }
                     break;
+
+                case wire::MsgType::GetMetrics:
+                    if (header.length != 0) {
+                      return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                    }
+                    if (auto r = handle_get_metrics(client_fd, header.seq, metrics, event_sink); !r) {
+                      return r;
+                    }
+                    break;
     
                 default:
                     return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
@@ -339,9 +391,24 @@ namespace{
             error.sys_errno ? std::strerror(error.sys_errno) : "n/a"
         );
     }
+
+    wire::MetricsSnapshot to_wire_metrics(const hft::CoordinatorMetricsSnapshot& s) {
+        wire::MetricsSnapshot out{};
+        for (std::size_t i = 0; i < 6; ++i) out.event_type_counts[i] = s.event_type_counts[i];
+        for (std::size_t i = 0; i < 4; ++i) out.reject_reason_counts[i] = s.reject_reason_counts[i];
+        out.dropped_events = s.dropped_events;
+        out.queued_events = s.queued_events;
+        return out;
+    }
+
+    std::expected<void, hft::Error> handle_get_metrics(int client_fd,uint16_t seq, const hft::CoordinatorMetrics& metrics, const hft::QueueEventSink& event_sink) {
+      const auto snap = hft::snapshot(metrics, event_sink);
+      const auto msg = to_wire_metrics(snap);
+      return send_frame(client_fd, wire::MsgType::MetricsSnapshot, seq, &msg, sizeof(msg));
+    }
 }
 
-int main()
+int main(int argc, char* argv[])
 {   
     constexpr int port = 9000;
 
@@ -354,7 +421,15 @@ int main()
     int listen_fd = *listen_result;
     hft::Exchange exchange;
     hft::Oms oms;
-    hft::QueueEventSink event_sink;
+
+    
+    const std::string journal = "state/oms.journal";
+    if (!hft::replay_journal(journal, oms)) {
+    return 1;
+    }
+    hft::rebuild_exchange_from_oms(oms, exchange);
+
+    hft::QueueEventSink event_sink(parse_event_sink_max_queue_size(argc, argv));
     hft::OrderCoordinator coordinator(oms, exchange, &event_sink);
     hft::CoordinatorMetrics coordinator_metrics{};
 
@@ -368,7 +443,7 @@ int main()
     
         int client_fd = *client_result;
     
-        auto session_result = handle_client(client_fd, coordinator);
+        auto session_result = handle_client(client_fd, coordinator, coordinator_metrics, event_sink);
         if (!session_result && session_result.error().code != hft::ErrorCode::PeerClosed) {
             print_error(session_result.error(), "client");
         }

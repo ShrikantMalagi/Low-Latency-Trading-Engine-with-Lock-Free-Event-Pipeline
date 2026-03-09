@@ -217,4 +217,13 @@ namespace hft {
     return status == OrderStatus::Live ||
            status == OrderStatus::PartiallyFilled;
   }
+
+  std::vector<OrderRecord> Oms::all_orders() const {
+    std::vector<OrderRecord> out;
+    out.reserve(orders.size());
+    for (const auto& [_, rec] : orders) {
+      out.push_back(rec);
+    }
+    return out;
+  }
 }

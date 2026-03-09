@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -62,14 +63,23 @@ struct CoordinatorEventEnvelope {
 
 class OrderCoordinator {
 public:
-  OrderCoordinator(Oms& oms_ref, Exchange& exchange_ref, CoordinatorEventSink* sink_ref = nullptr)
-      : oms(oms_ref), exchange(exchange_ref), sink(sink_ref) {}
+  OrderCoordinator(
+      Oms& oms_ref,
+      Exchange& exchange_ref,
+      CoordinatorEventSink* sink_ref = nullptr,
+      std::string journal_path_ref = {})
+      : oms(oms_ref),
+        exchange(exchange_ref),
+        sink(sink_ref),
+        journal_path(std::move(journal_path_ref)) {}
 
   std::expected<ExecResponse, ExecReject> submit_new(Order order);
 
   std::expected<ExecResponse, ExecReject> submit_cancel(uint64_t order_id);
 
 private:
+
+  bool journal_enabled() const { return !journal_path.empty(); }
 
   void emit(const CoordinatorEvent& event){
     if(sink != nullptr){
@@ -80,6 +90,7 @@ private:
   Oms& oms;
   Exchange& exchange;
   CoordinatorEventSink* sink;
+  std::string journal_path;
 };
 
 }

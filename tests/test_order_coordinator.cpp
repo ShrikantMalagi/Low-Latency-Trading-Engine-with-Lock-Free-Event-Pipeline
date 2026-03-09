@@ -1,7 +1,14 @@
 #include "order_coordinator.hpp"
 #include "coordinator_event_sink.hpp"
+#include "recovery.hpp"
 
 #include <gtest/gtest.h>
+
+#include <cstdio>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <unistd.h>
 
 using namespace hft;
 
@@ -32,6 +39,32 @@ struct RecordingSink : CoordinatorEventSink {
     events.push_back(event);
   }
 };
+
+std::string make_temp_journal_path() {
+  char tmp[] = "/tmp/hft_journal_XXXXXX";
+  const int fd = ::mkstemp(tmp);
+  if (fd >= 0) {
+    ::close(fd);
+  }
+  return std::string(tmp);
+}
+
+std::vector<int> read_journal_event_types(const std::string& path) {
+  std::ifstream in(path);
+  std::vector<int> types;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    const auto pos = line.find(',');
+    if (pos == std::string::npos) {
+      continue;
+    }
+    types.push_back(std::stoi(line.substr(0, pos)));
+  }
+  return types;
+}
 
 }
 
@@ -400,4 +433,67 @@ TEST(OrderCoordinator, QueueSinkTreatsZeroMaxQueueSizeAsOne) {
   auto only = sink.try_pop();
   ASSERT_TRUE(only.has_value());
   EXPECT_EQ(only->event.order_id, 9502u);
+}
+
+TEST(OrderCoordinator, JournalsSubmitNewAckAndFillEventsForCrossingOrder) {
+  const std::string journal_path = make_temp_journal_path();
+  ASSERT_EQ(std::remove(journal_path.c_str()), 0);
+
+  Oms oms;
+  Exchange exchange;
+  OrderCoordinator coordinator(oms, exchange, nullptr, journal_path);
+
+  ASSERT_TRUE(coordinator.submit_new(MakeSell(9601, 101, 3)).has_value());
+  ASSERT_TRUE(coordinator.submit_new(MakeBuy(9602, 105, 3)).has_value());
+
+  const auto types = read_journal_event_types(journal_path);
+  ASSERT_EQ(types.size(), 6u);
+  EXPECT_EQ(types[0], static_cast<int>(OmsEventType::SubmitNew));
+  EXPECT_EQ(types[1], static_cast<int>(OmsEventType::NewAck));
+  EXPECT_EQ(types[2], static_cast<int>(OmsEventType::SubmitNew));
+  EXPECT_EQ(types[3], static_cast<int>(OmsEventType::NewAck));
+  EXPECT_EQ(types[4], static_cast<int>(OmsEventType::Fill));
+  EXPECT_EQ(types[5], static_cast<int>(OmsEventType::Fill));
+
+  EXPECT_EQ(std::remove(journal_path.c_str()), 0);
+}
+
+TEST(OrderCoordinator, JournalsCancelAckAndCancelRejectEvents) {
+  const std::string ack_journal_path = make_temp_journal_path();
+  ASSERT_EQ(std::remove(ack_journal_path.c_str()), 0);
+
+  Oms oms1;
+  Exchange exchange1;
+  OrderCoordinator coordinator1(oms1, exchange1, nullptr, ack_journal_path);
+  ASSERT_TRUE(coordinator1.submit_new(MakeBuy(9701, 100, 4)).has_value());
+  ASSERT_TRUE(coordinator1.submit_cancel(9701).has_value());
+
+  const auto ack_types = read_journal_event_types(ack_journal_path);
+  ASSERT_EQ(ack_types.size(), 4u);
+  EXPECT_EQ(ack_types[0], static_cast<int>(OmsEventType::SubmitNew));
+  EXPECT_EQ(ack_types[1], static_cast<int>(OmsEventType::NewAck));
+  EXPECT_EQ(ack_types[2], static_cast<int>(OmsEventType::SubmitCancel));
+  EXPECT_EQ(ack_types[3], static_cast<int>(OmsEventType::CancelAck));
+  EXPECT_EQ(std::remove(ack_journal_path.c_str()), 0);
+
+  const std::string rej_journal_path = make_temp_journal_path();
+  ASSERT_EQ(std::remove(rej_journal_path.c_str()), 0);
+
+  Oms oms2;
+  Exchange exchange2;
+  OrderCoordinator coordinator2(oms2, exchange2, nullptr, rej_journal_path);
+  ASSERT_TRUE(coordinator2.submit_new(MakeBuy(9702, 100, 4)).has_value());
+  ASSERT_TRUE(exchange2.cancel(9702));
+
+  auto cancel_result = coordinator2.submit_cancel(9702);
+  ASSERT_FALSE(cancel_result.has_value());
+  EXPECT_EQ(cancel_result.error().reason, ExecRejectReason::UnknownOrderId);
+
+  const auto rej_types = read_journal_event_types(rej_journal_path);
+  ASSERT_EQ(rej_types.size(), 4u);
+  EXPECT_EQ(rej_types[0], static_cast<int>(OmsEventType::SubmitNew));
+  EXPECT_EQ(rej_types[1], static_cast<int>(OmsEventType::NewAck));
+  EXPECT_EQ(rej_types[2], static_cast<int>(OmsEventType::SubmitCancel));
+  EXPECT_EQ(rej_types[3], static_cast<int>(OmsEventType::CancelReject));
+  EXPECT_EQ(std::remove(rej_journal_path.c_str()), 0);
 }

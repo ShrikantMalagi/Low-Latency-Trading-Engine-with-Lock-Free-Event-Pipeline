@@ -62,6 +62,8 @@ public:
 
   bool is_live(uint64_t order_id) const;
 
+  std::vector<OrderRecord> all_orders() const;
+
 private:
   std::unordered_map<uint64_t, OrderRecord> orders;
 };

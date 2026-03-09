@@ -28,6 +28,7 @@ target_sources(exchange_server PRIVATE
   services/coordination/order_coordinator.cpp
   services/coordination/coordinator_event_sink.cpp
   services/coordination/coordinator_metrics.cpp
+  services/recovery/recovery.cpp
 )
 target_include_directories(exchange_server PRIVATE include)
 target_link_libraries(exchange_server PRIVATE protocol)
@@ -69,6 +70,7 @@ add_executable(order_coordinator_tests
   tests/test_order_coordinator.cpp
   services/coordination/order_coordinator.cpp
   services/coordination/coordinator_event_sink.cpp
+  services/recovery/recovery.cpp
   services/oms/oms.cpp
   services/exchange/exchange.cpp
 )
