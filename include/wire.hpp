@@ -49,8 +49,12 @@ namespace wire{
     struct MetricsSnapshot {
         uint64_t event_type_counts[6];
         uint64_t reject_reason_counts[4];
-        uint64_t dropped_events;
-        uint64_t queued_events;
+        uint64_t coordinator_dropped_events;
+        uint64_t coordinator_queued_events;
+        uint64_t journal_enqueued_events;
+        uint64_t journal_flushed_events;
+        uint64_t journal_dropped_events;
+        uint64_t journal_queue_depth;
     };
     
     #pragma pack(pop)

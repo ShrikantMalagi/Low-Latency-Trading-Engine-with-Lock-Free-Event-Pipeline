@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -25,6 +26,16 @@ namespace {
 
 constexpr int kPort = 9000;
 constexpr std::string_view kLoopback = "127.0.0.1";
+
+std::string make_temp_journal_path() {
+  char tmp[] = "/tmp/hft_server_journal_XXXXXX";
+  const int fd = ::mkstemp(tmp);
+  if (fd >= 0) {
+    ::close(fd);
+    std::remove(tmp);
+  }
+  return std::string(tmp);
+}
 
 bool write_all(int fd, const void* buf, size_t n) {
   const auto* in = static_cast<const char*>(buf);
@@ -95,15 +106,37 @@ protected:
   virtual const char* EventSinkMaxQueueArg() const { return nullptr; }
 
   void SetUp() override {
+    journal_path_ = make_temp_journal_path();
+    StartServer();
+  }
+
+  void TearDown() override {
+    StopServer();
+    if (!journal_path_.empty()) {
+      std::remove(journal_path_.c_str());
+    }
+  }
+
+  void StartServer() {
     server_pid_ = ::fork();
     ASSERT_GE(server_pid_, 0) << "fork failed: " << std::strerror(errno);
 
     if (server_pid_ == 0) {
       const char* max_queue_arg = EventSinkMaxQueueArg();
+      const std::string journal_arg = "--journal-path=" + journal_path_;
       if (max_queue_arg != nullptr) {
-        ::execl(EXCHANGE_SERVER_PATH, EXCHANGE_SERVER_PATH, max_queue_arg, static_cast<char*>(nullptr));
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            max_queue_arg,
+            static_cast<char*>(nullptr));
       } else {
-        ::execl(EXCHANGE_SERVER_PATH, EXCHANGE_SERVER_PATH, static_cast<char*>(nullptr));
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            static_cast<char*>(nullptr));
       }
       std::perror("execl");
       _exit(127);
@@ -123,11 +156,12 @@ protected:
     ASSERT_TRUE(connected) << "server did not start listening on port " << kPort;
   }
 
-  void TearDown() override {
+  void StopServer() {
     if (server_pid_ > 0) {
       ::kill(server_pid_, SIGTERM);
       int status = 0;
       ::waitpid(server_pid_, &status, 0);
+      server_pid_ = -1;
     }
   }
 
@@ -138,6 +172,7 @@ protected:
   }
 
   pid_t server_pid_ = -1;
+  std::string journal_path_;
 };
 
 class SmallQueueServerFixture : public ServerFixture {
@@ -705,21 +740,39 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
       .length = 0,
       .seq = 94,
   };
-  ASSERT_TRUE(write_all(fd2, &get_metrics_hdr, sizeof(get_metrics_hdr)));
-
   wire::Header metrics_hdr{};
   wire::MetricsSnapshot metrics{};
-  ASSERT_TRUE(read_exact(fd2, &metrics_hdr, sizeof(metrics_hdr)));
-  ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
+  bool settled = false;
 
-  ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
-  ASSERT_EQ(metrics_hdr.length, sizeof(wire::MetricsSnapshot));
-  ASSERT_EQ(metrics_hdr.seq, 94);
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(write_all(fd2, &get_metrics_hdr, sizeof(get_metrics_hdr)));
+    ASSERT_TRUE(read_exact(fd2, &metrics_hdr, sizeof(metrics_hdr)));
+    ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
 
+    ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
+    ASSERT_EQ(metrics_hdr.length, sizeof(wire::MetricsSnapshot));
+    ASSERT_EQ(metrics_hdr.seq, 94);
+
+    if (metrics.event_type_counts[1] == 1u &&
+        metrics.event_type_counts[4] == 1u &&
+        metrics.reject_reason_counts[1] == 1u &&
+        metrics.reject_reason_counts[2] == 1u &&
+        metrics.journal_enqueued_events >= 2u &&
+        metrics.journal_dropped_events == 0u) {
+      settled = true;
+      break;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  EXPECT_TRUE(settled);
   EXPECT_EQ(metrics.event_type_counts[1], 1u);
   EXPECT_EQ(metrics.event_type_counts[4], 1u);
   EXPECT_EQ(metrics.reject_reason_counts[1], 1u);
   EXPECT_EQ(metrics.reject_reason_counts[2], 1u);
+  EXPECT_GE(metrics.journal_enqueued_events, 2u);
+  EXPECT_EQ(metrics.journal_dropped_events, 0u);
 
   ::close(fd2);
 }
@@ -809,7 +862,87 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ASSERT_EQ(metrics_hdr.length, sizeof(wire::MetricsSnapshot));
   ASSERT_EQ(metrics_hdr.seq, 204);
 
-  EXPECT_EQ(metrics.dropped_events, 1u);
+  EXPECT_EQ(metrics.coordinator_dropped_events, 1u);
+
+  ::close(fd2);
+}
+
+TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecks) {
+  const int fd1 = OpenClient();
+  ASSERT_GE(fd1, 0);
+
+  const wire::Header new_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 301,
+  };
+  const wire::NewOrder new_msg{
+      .order_id = 30001,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd1, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd1, &new_msg, sizeof(new_msg)));
+
+  wire::Header ack_hdr{};
+  wire::Ack ack{};
+  ASSERT_TRUE(read_exact(fd1, &ack_hdr, sizeof(ack_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &ack, sizeof(ack)));
+  ASSERT_EQ(ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(ack.order_id, 30001u);
+
+  ::close(fd1);
+
+  StopServer();
+  StartServer();
+
+  const int fd2 = OpenClient();
+  ASSERT_GE(fd2, 0);
+
+  const wire::Header dup_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 302,
+  };
+  const wire::NewOrder dup_msg{
+      .order_id = 30001,
+      .side = 1,
+      .price = 101,
+      .qty = 2,
+  };
+
+  ASSERT_TRUE(write_all(fd2, &dup_hdr, sizeof(dup_hdr)));
+  ASSERT_TRUE(write_all(fd2, &dup_msg, sizeof(dup_msg)));
+
+  wire::Header dup_rej_hdr{};
+  wire::Reject dup_rej{};
+  ASSERT_TRUE(read_exact(fd2, &dup_rej_hdr, sizeof(dup_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &dup_rej, sizeof(dup_rej)));
+  ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  ASSERT_EQ(dup_rej.order_id, 30001u);
+  ASSERT_EQ(dup_rej.reason, 6);
+
+  const wire::Header cancel_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::Cancel),
+      .length = static_cast<uint16_t>(sizeof(wire::Cancel)),
+      .seq = 303,
+  };
+  const wire::Cancel cancel_msg{
+      .order_id = 30001,
+  };
+
+  ASSERT_TRUE(write_all(fd2, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd2, &cancel_msg, sizeof(cancel_msg)));
+
+  wire::Header cancel_ack_hdr{};
+  wire::Ack cancel_ack{};
+  ASSERT_TRUE(read_exact(fd2, &cancel_ack_hdr, sizeof(cancel_ack_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &cancel_ack, sizeof(cancel_ack)));
+  ASSERT_EQ(cancel_ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(cancel_ack_hdr.seq, 303);
+  ASSERT_EQ(cancel_ack.order_id, 30001u);
 
   ::close(fd2);
 }

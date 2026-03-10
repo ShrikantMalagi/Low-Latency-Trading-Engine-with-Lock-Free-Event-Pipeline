@@ -21,11 +21,31 @@ static bool parse_line(const std::string& line, OmsJournalEvent& e) {
   std::istringstream ss(line);
   std::string tok;
   int type = 0, side = 0;
-  if (!std::getline(ss, tok, ',')) return false; type = std::stoi(tok);
-  if (!std::getline(ss, tok, ',')) return false; e.order_id = std::stoull(tok);
-  if (!std::getline(ss, tok, ',')) return false; side = std::stoi(tok);
-  if (!std::getline(ss, tok, ',')) return false; e.price = std::stoll(tok);
-  if (!std::getline(ss, tok, ',')) return false; e.qty = std::stoll(tok);
+  if (!std::getline(ss, tok, ',')) {
+    return false;
+  }
+  type = std::stoi(tok);
+
+  if (!std::getline(ss, tok, ',')) {
+    return false;
+  }
+  e.order_id = std::stoull(tok);
+
+  if (!std::getline(ss, tok, ',')) {
+    return false;
+  }
+  side = std::stoi(tok);
+
+  if (!std::getline(ss, tok, ',')) {
+    return false;
+  }
+  e.price = std::stoll(tok);
+
+  if (!std::getline(ss, tok, ',')) {
+    return false;
+  }
+  e.qty = std::stoll(tok);
+
   e.type = static_cast<OmsEventType>(type);
   e.side = static_cast<uint8_t>(side);
   return true;

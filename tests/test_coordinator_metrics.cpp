@@ -114,8 +114,8 @@ TEST(CoordinatorMetrics, SnapshotIncludesDroppedAndQueuedEvents) {
     sink.on_event(CoordinatorEvent{.type = CoordinatorEventType::NewAccepted, .order_id = 3}); // drops oldest
   
     const auto snap_before = hft::snapshot(metrics, sink);
-    EXPECT_EQ(snap_before.dropped_events, 1u);
-    EXPECT_EQ(snap_before.queued_events, 2u);
+    EXPECT_EQ(snap_before.coordinator_dropped_events, 1u);
+    EXPECT_EQ(snap_before.coordinator_queued_events, 2u);
   
     FILE* out = std::tmpfile();
     ASSERT_NE(out, nullptr);
@@ -123,8 +123,8 @@ TEST(CoordinatorMetrics, SnapshotIncludesDroppedAndQueuedEvents) {
     std::fclose(out);
   
     const auto snap_after = hft::snapshot(metrics, sink);
-    EXPECT_EQ(snap_after.queued_events, 0u);
-    EXPECT_EQ(snap_after.dropped_events, 1u);
+    EXPECT_EQ(snap_after.coordinator_queued_events, 0u);
+    EXPECT_EQ(snap_after.coordinator_dropped_events, 1u);
     EXPECT_EQ(snap_after.event_type_counts[hft::event_type_index(CoordinatorEventType::NewAccepted)], 2u);
   }
 

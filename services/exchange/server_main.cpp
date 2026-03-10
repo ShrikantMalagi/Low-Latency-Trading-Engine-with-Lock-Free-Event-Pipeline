@@ -5,6 +5,7 @@
 #include "coordinator_event_sink.hpp"
 #include "coordinator_metrics.hpp"
 #include "recovery.hpp"
+#include "journal_sink.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -16,10 +17,27 @@
 #include <expected>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <string_view>
 
 
 namespace{
+
+    const char* find_arg_value(int argc, char* argv[], std::string_view prefix) {
+        if (argv == nullptr) {
+            return nullptr;
+        }
+        for (int i = 1; i < argc; ++i) {
+            if (argv[i] == nullptr) {
+                continue;
+            }
+            std::string_view arg{argv[i]};
+            if (arg.starts_with(prefix)) {
+                return argv[i] + static_cast<std::ptrdiff_t>(prefix.size());
+            }
+        }
+        return nullptr;
+    }
 
     enum class RejectReason : uint16_t {
         InvalidMessage = 1,
@@ -46,20 +64,8 @@ namespace{
 
     std::size_t parse_event_sink_max_queue_size(int argc, char* argv[]) {
         constexpr std::size_t kDefaultMaxQueueSize = 4096;
-        if (argc < 2 || argv == nullptr || argv[1] == nullptr) {
-            return kDefaultMaxQueueSize;
-        }
-
-        constexpr std::string_view kPrefix = "--event-sink-max-queue=";
-        std::string_view arg{argv[1]};
-        const char* raw = nullptr;
-        if (arg.starts_with(kPrefix)) {
-            raw = argv[1] + static_cast<std::ptrdiff_t>(kPrefix.size());
-        } else {
-            raw = argv[1];
-        }
-
-        if (raw[0] == '\0') {
+        const char* raw = find_arg_value(argc, argv, "--event-sink-max-queue=");
+        if (raw == nullptr || raw[0] == '\0') {
             return kDefaultMaxQueueSize;
         }
 
@@ -70,6 +76,15 @@ namespace{
         }
 
         return static_cast<std::size_t>(parsed);
+    }
+
+    std::string parse_journal_path(int argc, char* argv[]) {
+        constexpr std::string_view kDefaultJournalPath = "state/oms.journal";
+        const char* raw = find_arg_value(argc, argv, "--journal-path=");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string(kDefaultJournalPath);
+        }
+        return std::string(raw);
     }
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -240,7 +255,8 @@ namespace{
         int client_fd,
         uint16_t seq,
         const hft::CoordinatorMetrics& metrics,
-        const hft::QueueEventSink& event_sink
+        const hft::QueueEventSink& event_sink,
+        const hft::JournalSink* journal_sink
     );
 
     std::expected<void, hft::Error> handle_new_order(
@@ -334,7 +350,8 @@ namespace{
         int client_fd,
         hft::OrderCoordinator& coordinator,
         const hft::CoordinatorMetrics& metrics,
-        const hft::QueueEventSink& event_sink
+        const hft::QueueEventSink& event_sink,
+        const hft::JournalSink* journal_sink
     ) {
         while (true) {
             wire::Header header{};
@@ -369,7 +386,7 @@ namespace{
                     if (header.length != 0) {
                       return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
                     }
-                    if (auto r = handle_get_metrics(client_fd, header.seq, metrics, event_sink); !r) {
+                    if (auto r = handle_get_metrics(client_fd, header.seq, metrics, event_sink, journal_sink); !r) {
                       return r;
                     }
                     break;
@@ -396,13 +413,22 @@ namespace{
         wire::MetricsSnapshot out{};
         for (std::size_t i = 0; i < 6; ++i) out.event_type_counts[i] = s.event_type_counts[i];
         for (std::size_t i = 0; i < 4; ++i) out.reject_reason_counts[i] = s.reject_reason_counts[i];
-        out.dropped_events = s.dropped_events;
-        out.queued_events = s.queued_events;
+        out.coordinator_dropped_events = s.coordinator_dropped_events;
+        out.coordinator_queued_events = s.coordinator_queued_events;
+        out.journal_enqueued_events = s.journal_enqueued_events;
+        out.journal_flushed_events = s.journal_flushed_events;
+        out.journal_dropped_events = s.journal_dropped_events;
+        out.journal_queue_depth = s.journal_queue_depth;
         return out;
     }
 
-    std::expected<void, hft::Error> handle_get_metrics(int client_fd,uint16_t seq, const hft::CoordinatorMetrics& metrics, const hft::QueueEventSink& event_sink) {
-      const auto snap = hft::snapshot(metrics, event_sink);
+    std::expected<void, hft::Error> handle_get_metrics(
+        int client_fd,
+        uint16_t seq,
+        const hft::CoordinatorMetrics& metrics,
+        const hft::QueueEventSink& event_sink,
+        const hft::JournalSink* journal_sink) {
+      const auto snap = hft::snapshot(metrics, event_sink, journal_sink);
       const auto msg = to_wire_metrics(snap);
       return send_frame(client_fd, wire::MsgType::MetricsSnapshot, seq, &msg, sizeof(msg));
     }
@@ -423,14 +449,17 @@ int main(int argc, char* argv[])
     hft::Oms oms;
 
     
-    const std::string journal = "state/oms.journal";
-    if (!hft::replay_journal(journal, oms)) {
-    return 1;
+    const std::string journal_path = parse_journal_path(argc, argv);
+
+    hft::AsyncJournalSink async_sink(journal_path, 16384);
+    if (!hft::replay_journal(journal_path, oms)) {
+        std::fprintf(stderr, "fatal: replay_journal failed\n");
+        return 1;
     }
     hft::rebuild_exchange_from_oms(oms, exchange);
 
     hft::QueueEventSink event_sink(parse_event_sink_max_queue_size(argc, argv));
-    hft::OrderCoordinator coordinator(oms, exchange, &event_sink);
+    hft::OrderCoordinator coordinator(oms, exchange, &event_sink, &async_sink);
     hft::CoordinatorMetrics coordinator_metrics{};
 
     
@@ -443,7 +472,7 @@ int main(int argc, char* argv[])
     
         int client_fd = *client_result;
     
-        auto session_result = handle_client(client_fd, coordinator, coordinator_metrics, event_sink);
+        auto session_result = handle_client(client_fd, coordinator, coordinator_metrics, event_sink, &async_sink);
         if (!session_result && session_result.error().code != hft::ErrorCode::PeerClosed) {
             print_error(session_result.error(), "client");
         }

@@ -14,11 +14,11 @@ ExecRejectReason map_oms_error(OmsErrorCode code) {
 }
 
 std::expected<void, ExecReject> append_or_reject(
-    const std::string& journal_path,
-    const OmsJournalEvent& event,
-    uint64_t order_id,
-    std::string_view context) {
-  if (journal_path.empty() || append_journal_event(journal_path, event)) {
+  JournalSink* sink,
+  const OmsJournalEvent& event,
+  uint64_t order_id,
+  std::string_view context) {
+  if (sink == nullptr || sink->write(event)) {
     return {};
   }
   return std::unexpected(ExecReject{
@@ -62,7 +62,7 @@ std::expected<ExecResponse, ExecReject> OrderCoordinator::submit_new(Order order
   };
 
   auto append_or_internal = [&](const OmsJournalEvent& event, uint64_t order_id, std::string_view context) -> std::optional<ExecReject> {
-    if (auto jr = append_or_reject(journal_path, event, order_id, context); !jr) {
+    if (auto jr = append_or_reject(journal_sink, event, order_id, context); !jr) {
       ExecReject rej = jr.error();
       emit(CoordinatorEvent{
           .type = CoordinatorEventType::InternalError,
@@ -208,7 +208,7 @@ std::expected<ExecResponse, ExecReject> OrderCoordinator::submit_cancel(uint64_t
   };
 
   auto append_or_internal = [&](const OmsJournalEvent& event, std::string_view context) -> std::optional<ExecReject> {
-    if (auto jr = append_or_reject(journal_path, event, order_id, context); !jr) {
+    if (auto jr = append_or_reject(journal_sink, event, order_id, context); !jr) {
       ExecReject rej = jr.error();
       emit(CoordinatorEvent{
           .type = CoordinatorEventType::InternalError,

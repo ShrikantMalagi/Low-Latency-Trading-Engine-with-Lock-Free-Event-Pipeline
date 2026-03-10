@@ -2,6 +2,7 @@
 
 #include "exchange.hpp"
 #include "oms.hpp"
+#include "journal_sink.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -67,20 +68,17 @@ public:
       Oms& oms_ref,
       Exchange& exchange_ref,
       CoordinatorEventSink* sink_ref = nullptr,
-      std::string journal_path_ref = {})
+      JournalSink* journal_sink_ref = nullptr)
       : oms(oms_ref),
         exchange(exchange_ref),
         sink(sink_ref),
-        journal_path(std::move(journal_path_ref)) {}
+        journal_sink(journal_sink_ref) {}
 
   std::expected<ExecResponse, ExecReject> submit_new(Order order);
 
   std::expected<ExecResponse, ExecReject> submit_cancel(uint64_t order_id);
 
 private:
-
-  bool journal_enabled() const { return !journal_path.empty(); }
-
   void emit(const CoordinatorEvent& event){
     if(sink != nullptr){
       sink->on_event(event);
@@ -90,7 +88,7 @@ private:
   Oms& oms;
   Exchange& exchange;
   CoordinatorEventSink* sink;
-  std::string journal_path;
+  JournalSink* journal_sink{};
 };
 
 }

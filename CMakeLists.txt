@@ -29,6 +29,7 @@ target_sources(exchange_server PRIVATE
   services/coordination/coordinator_event_sink.cpp
   services/coordination/coordinator_metrics.cpp
   services/recovery/recovery.cpp
+  services/recovery/journal_sink.cpp
 )
 target_include_directories(exchange_server PRIVATE include)
 target_link_libraries(exchange_server PRIVATE protocol)
@@ -71,6 +72,7 @@ add_executable(order_coordinator_tests
   services/coordination/order_coordinator.cpp
   services/coordination/coordinator_event_sink.cpp
   services/recovery/recovery.cpp
+  services/recovery/journal_sink.cpp
   services/oms/oms.cpp
   services/exchange/exchange.cpp
 )
@@ -84,6 +86,16 @@ add_executable(coordinator_metrics_tests
 )
 target_include_directories(coordinator_metrics_tests PRIVATE include)
 target_link_libraries(coordinator_metrics_tests PRIVATE GTest::gtest_main protocol)
+
+add_executable(journal_sink_tests
+  tests/test_journal_sink.cpp
+  services/recovery/journal_sink.cpp
+  services/recovery/recovery.cpp
+  services/oms/oms.cpp
+  services/exchange/exchange.cpp
+)
+target_include_directories(journal_sink_tests PRIVATE include)
+target_link_libraries(journal_sink_tests PRIVATE GTest::gtest_main protocol)
 
 add_executable(server_integration_tests
   tests/test_server_integration.cpp
@@ -100,4 +112,5 @@ gtest_discover_tests(exchange_tests)
 gtest_discover_tests(oms_tests)
 gtest_discover_tests(order_coordinator_tests)
 gtest_discover_tests(coordinator_metrics_tests)
+gtest_discover_tests(journal_sink_tests)
 gtest_discover_tests(server_integration_tests)

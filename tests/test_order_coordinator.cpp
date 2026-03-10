@@ -441,7 +441,8 @@ TEST(OrderCoordinator, JournalsSubmitNewAckAndFillEventsForCrossingOrder) {
 
   Oms oms;
   Exchange exchange;
-  OrderCoordinator coordinator(oms, exchange, nullptr, journal_path);
+  SyncJournalSink sink(journal_path);
+  OrderCoordinator coordinator(oms, exchange, nullptr, &sink);
 
   ASSERT_TRUE(coordinator.submit_new(MakeSell(9601, 101, 3)).has_value());
   ASSERT_TRUE(coordinator.submit_new(MakeBuy(9602, 105, 3)).has_value());
@@ -464,7 +465,8 @@ TEST(OrderCoordinator, JournalsCancelAckAndCancelRejectEvents) {
 
   Oms oms1;
   Exchange exchange1;
-  OrderCoordinator coordinator1(oms1, exchange1, nullptr, ack_journal_path);
+  SyncJournalSink sink1(ack_journal_path);
+  OrderCoordinator coordinator1(oms1, exchange1, nullptr, &sink1);
   ASSERT_TRUE(coordinator1.submit_new(MakeBuy(9701, 100, 4)).has_value());
   ASSERT_TRUE(coordinator1.submit_cancel(9701).has_value());
 
@@ -481,7 +483,8 @@ TEST(OrderCoordinator, JournalsCancelAckAndCancelRejectEvents) {
 
   Oms oms2;
   Exchange exchange2;
-  OrderCoordinator coordinator2(oms2, exchange2, nullptr, rej_journal_path);
+  SyncJournalSink sink2(rej_journal_path);
+  OrderCoordinator coordinator2(oms2, exchange2, nullptr, &sink2);
   ASSERT_TRUE(coordinator2.submit_new(MakeBuy(9702, 100, 4)).has_value());
   ASSERT_TRUE(exchange2.cancel(9702));
 

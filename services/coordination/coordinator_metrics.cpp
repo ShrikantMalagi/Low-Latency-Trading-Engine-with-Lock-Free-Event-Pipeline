@@ -55,12 +55,19 @@ static void print_drain_totals(
       static_cast<unsigned long long>(dropped_events));
 }
 
-CoordinatorMetricsSnapshot snapshot(const CoordinatorMetrics& metrics, const QueueEventSink& event_sink) {
+CoordinatorMetricsSnapshot snapshot(
+    const CoordinatorMetrics& metrics,
+    const QueueEventSink& event_sink,
+    const JournalSink* journal_sink) {
   return CoordinatorMetricsSnapshot{
       .event_type_counts = metrics.event_type_counts,
       .reject_reason_counts = metrics.reject_reason_counts,
-      .dropped_events = static_cast<uint64_t>(event_sink.dropped_events()),
-      .queued_events = static_cast<uint64_t>(event_sink.size()),
+      .coordinator_dropped_events = static_cast<uint64_t>(event_sink.dropped_events()),
+      .coordinator_queued_events = static_cast<uint64_t>(event_sink.size()),
+      .journal_enqueued_events = journal_sink ? journal_sink->enqueued() : 0,
+      .journal_flushed_events = journal_sink ? journal_sink->flushed() : 0,
+      .journal_dropped_events = journal_sink ? journal_sink->dropped() : 0,
+      .journal_queue_depth = journal_sink ? journal_sink->queue_depth() : 0,
   };
 }
 
