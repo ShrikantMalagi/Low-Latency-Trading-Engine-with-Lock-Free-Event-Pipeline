@@ -2,19 +2,59 @@
 #include "wire.hpp"
 #include "error.hpp"
 #include "order_coordinator.hpp"
+#include "coordinator_event_sink.hpp"
+#include "coordinator_metrics.hpp"
+#include "recovery.hpp"
+#include "journal_sink.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <csignal>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <memory>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
 
 
 namespace{
+
+    volatile std::sig_atomic_t g_shutdown_requested = 0;
+
+    void handle_shutdown_signal(int) {
+        g_shutdown_requested = 1;
+    }
+
+    bool shutdown_requested() {
+        return g_shutdown_requested != 0;
+    }
+
+    void install_signal_handlers() {
+        std::signal(SIGINT, handle_shutdown_signal);
+        std::signal(SIGTERM, handle_shutdown_signal);
+    }
+
+    const char* find_arg_value(int argc, char* argv[], std::string_view prefix) {
+        if (argv == nullptr) {
+            return nullptr;
+        }
+        for (int i = 1; i < argc; ++i) {
+            if (argv[i] == nullptr) {
+                continue;
+            }
+            std::string_view arg{argv[i]};
+            if (arg.starts_with(prefix)) {
+                return argv[i] + static_cast<std::ptrdiff_t>(prefix.size());
+            }
+        }
+        return nullptr;
+    }
 
     enum class RejectReason : uint16_t {
         InvalidMessage = 1,
@@ -37,6 +77,39 @@ namespace{
             default:
                 return RejectReason::InvalidMessage;
         }
+    }
+
+    std::size_t parse_event_sink_max_queue_size(int argc, char* argv[]) {
+        constexpr std::size_t kDefaultMaxQueueSize = 4096;
+        const char* raw = find_arg_value(argc, argv, "--event-sink-max-queue=");
+        if (raw == nullptr || raw[0] == '\0') {
+            return kDefaultMaxQueueSize;
+        }
+
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed == 0) {
+            return kDefaultMaxQueueSize;
+        }
+
+        return static_cast<std::size_t>(parsed);
+    }
+
+    std::string parse_journal_path(int argc, char* argv[]) {
+        constexpr std::string_view kDefaultJournalPath = "state/oms.journal";
+        const char* raw = find_arg_value(argc, argv, "--journal-path=");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string(kDefaultJournalPath);
+        }
+        return std::string(raw);
+    }
+
+    bool use_sync_journal(int argc, char* argv[]) {
+        const char* raw = find_arg_value(argc, argv, "--journal-mode=");
+        if (raw == nullptr || raw[0] == '\0') {
+            return false;
+        }
+        return std::string_view(raw) == "sync";
     }
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -78,6 +151,13 @@ namespace{
             }
             
             if( errno == EINTR){
+                if (shutdown_requested()) {
+                    return std::unexpected(hft::Error{
+                        .code = hft::ErrorCode::PeerClosed,
+                        .sys_errno = 0,
+                        .context = "shutdown requested",
+                    });
+                }
                 continue;
             }
 
@@ -102,6 +182,13 @@ namespace{
     
             if (r < 0) {
                 if (errno == EINTR) {
+                    if (shutdown_requested()) {
+                        return std::unexpected(hft::Error{
+                            .code = hft::ErrorCode::PeerClosed,
+                            .sys_errno = 0,
+                            .context = "shutdown requested",
+                        });
+                    }
                     continue;
                 }
     
@@ -124,6 +211,13 @@ namespace{
     
             if (w < 0) {
                 if (errno == EINTR) {
+                    if (shutdown_requested()) {
+                        return std::unexpected(hft::Error{
+                            .code = hft::ErrorCode::Write,
+                            .sys_errno = 0,
+                            .context = "shutdown requested",
+                        });
+                    }
                     continue;
                 }
     
@@ -202,6 +296,15 @@ namespace{
     
         return send_frame(fd, wire::MsgType::Reject, seq, &reject, sizeof(reject));
     }
+
+    std::expected<void, hft::Error> handle_get_metrics(
+        int client_fd,
+        uint16_t seq,
+        const hft::CoordinatorMetrics& metrics,
+        const hft::QueueEventSink& event_sink,
+        const hft::JournalSink* journal_sink,
+        const hft::RecoveryStatus& recovery_status
+    );
 
     std::expected<void, hft::Error> handle_new_order(
         int client_fd,
@@ -290,7 +393,14 @@ namespace{
         return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidMessage);
     }
     
-    std::expected<void, hft::Error> handle_client(int client_fd, hft::OrderCoordinator& coordinator) {
+    std::expected<void, hft::Error> handle_client(
+        int client_fd,
+        hft::OrderCoordinator& coordinator,
+        const hft::CoordinatorMetrics& metrics,
+        const hft::QueueEventSink& event_sink,
+        const hft::JournalSink* journal_sink,
+        const hft::RecoveryStatus& recovery_status
+    ) {
         while (true) {
             wire::Header header{};
             if (auto result = read_exact(client_fd, &header, sizeof(header)); !result) {
@@ -319,6 +429,15 @@ namespace{
                         return result;
                     }
                     break;
+
+                case wire::MsgType::GetMetrics:
+                    if (header.length != 0) {
+                      return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                    }
+                    if (auto r = handle_get_metrics(client_fd, header.seq, metrics, event_sink, journal_sink, recovery_status); !r) {
+                      return r;
+                    }
+                    break;
     
                 default:
                     return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
@@ -338,12 +457,41 @@ namespace{
         );
     }
 
+    wire::MetricsSnapshot to_wire_metrics(const hft::CoordinatorMetricsSnapshot& s) {
+        wire::MetricsSnapshot out{};
+        for (std::size_t i = 0; i < 6; ++i) out.event_type_counts[i] = s.event_type_counts[i];
+        for (std::size_t i = 0; i < 4; ++i) out.reject_reason_counts[i] = s.reject_reason_counts[i];
+        out.coordinator_dropped_events = s.coordinator_dropped_events;
+        out.coordinator_queued_events = s.coordinator_queued_events;
+        out.journal_enqueued_events = s.journal_enqueued_events;
+        out.journal_flushed_events = s.journal_flushed_events;
+        out.journal_dropped_events = s.journal_dropped_events;
+        out.journal_queue_depth = s.journal_queue_depth;
+        out.recovery_replay_attempted = s.recovery_replay_attempted;
+        out.recovery_replay_succeeded = s.recovery_replay_succeeded;
+        out.recovery_records_replayed = s.recovery_records_replayed;
+        out.recovery_error_code = s.recovery_error_code;
+        out.recovery_error_line = s.recovery_error_line;
+        return out;
+    }
 
+    std::expected<void, hft::Error> handle_get_metrics(
+        int client_fd,
+        uint16_t seq,
+        const hft::CoordinatorMetrics& metrics,
+        const hft::QueueEventSink& event_sink,
+        const hft::JournalSink* journal_sink,
+        const hft::RecoveryStatus& recovery_status) {
+      const auto snap = hft::snapshot(metrics, event_sink, journal_sink, &recovery_status);
+      const auto msg = to_wire_metrics(snap);
+      return send_frame(client_fd, wire::MsgType::MetricsSnapshot, seq, &msg, sizeof(msg));
+    }
 }
 
-int main()
+int main(int argc, char* argv[])
 {   
     constexpr int port = 9000;
+    install_signal_handlers();
 
     auto listen_result = make_listen_socket(port);
     if (!listen_result) {
@@ -354,24 +502,73 @@ int main()
     int listen_fd = *listen_result;
     hft::Exchange exchange;
     hft::Oms oms;
-    hft::OrderCoordinator coordinator(oms, exchange);
+    hft::RecoveryStatus recovery_status{};
+
     
-    while (true) {
+    const std::string journal_path = parse_journal_path(argc, argv);
+
+    std::unique_ptr<hft::JournalSink> journal_sink;
+    if (use_sync_journal(argc, argv)) {
+        journal_sink = std::make_unique<hft::SyncJournalSink>(journal_path);
+    } else {
+        journal_sink = std::make_unique<hft::AsyncJournalSink>(journal_path, 16384);
+    }
+    recovery_status.replay_attempted = true;
+    const auto replay_result = hft::replay_journal(journal_path, oms);
+    if (!replay_result) {
+        recovery_status.replay_succeeded = false;
+        recovery_status.records_replayed = replay_result.error().records_replayed;
+        recovery_status.replay_error_code = static_cast<uint64_t>(replay_result.error().code);
+        recovery_status.replay_error_line = replay_result.error().line_number;
+        std::fprintf(
+            stderr,
+            "fatal: replay_journal failed line=%zu code=%u records=%llu message=%s\n",
+            replay_result.error().line_number,
+            static_cast<unsigned>(replay_result.error().code),
+            static_cast<unsigned long long>(replay_result.error().records_replayed),
+            replay_result.error().message.c_str());
+        return 1;
+    }
+    recovery_status.replay_succeeded = true;
+    recovery_status.records_replayed = replay_result->records_replayed;
+    hft::rebuild_exchange_from_oms(oms, exchange);
+
+    hft::QueueEventSink event_sink(parse_event_sink_max_queue_size(argc, argv));
+    hft::OrderCoordinator coordinator(oms, exchange, &event_sink, journal_sink.get());
+    hft::CoordinatorMetrics coordinator_metrics{};
+
+    
+    while (!shutdown_requested()) {
         auto client_result = accept_client(listen_fd);
         if (!client_result) {
+            if (shutdown_requested() || client_result.error().context == "shutdown requested") {
+                break;
+            }
             print_error(client_result.error(), "accept");
             continue;
         }
     
         int client_fd = *client_result;
     
-        auto session_result = handle_client(client_fd, coordinator);
-        if (!session_result && session_result.error().code != hft::ErrorCode::PeerClosed) {
+        auto session_result = handle_client(
+            client_fd,
+            coordinator,
+            coordinator_metrics,
+            event_sink,
+            journal_sink.get(),
+            recovery_status);
+        if (!session_result &&
+            session_result.error().code != hft::ErrorCode::PeerClosed &&
+            session_result.error().context != "shutdown requested") {
             print_error(session_result.error(), "client");
         }
+
+        hft::drain_and_report(event_sink, coordinator_metrics);
     
         ::close(client_fd);
     }
+
+    journal_sink->flush();
     
     ::close(listen_fd);
     return 0;

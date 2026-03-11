@@ -32,7 +32,7 @@ Order MakeSell(
   };
 }
 
-}  // namespace
+} 
 
 TEST(Oms, SubmitNewCreatesPendingOrder) {
   Oms oms;
