@@ -55,6 +55,11 @@ namespace wire{
         uint64_t journal_flushed_events;
         uint64_t journal_dropped_events;
         uint64_t journal_queue_depth;
+        uint64_t recovery_replay_attempted;
+        uint64_t recovery_replay_succeeded;
+        uint64_t recovery_records_replayed;
+        uint64_t recovery_error_code;
+        uint64_t recovery_error_line;
     };
     
     #pragma pack(pop)

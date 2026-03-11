@@ -57,11 +57,30 @@ std::vector<int> read_journal_event_types(const std::string& path) {
     if (line.empty()) {
       continue;
     }
-    const auto pos = line.find(',');
-    if (pos == std::string::npos) {
+    const auto type_pos = line.find("|type=");
+    if (type_pos == std::string::npos) {
       continue;
     }
-    types.push_back(std::stoi(line.substr(0, pos)));
+    const auto value_start = type_pos + 6;
+    const auto value_end = line.find('|', value_start);
+    const std::string type_name =
+        value_end == std::string::npos ? line.substr(value_start) : line.substr(value_start, value_end - value_start);
+
+    if (type_name == "SubmitNew") {
+      types.push_back(static_cast<int>(OmsEventType::SubmitNew));
+    } else if (type_name == "NewAck") {
+      types.push_back(static_cast<int>(OmsEventType::NewAck));
+    } else if (type_name == "NewReject") {
+      types.push_back(static_cast<int>(OmsEventType::NewReject));
+    } else if (type_name == "SubmitCancel") {
+      types.push_back(static_cast<int>(OmsEventType::SubmitCancel));
+    } else if (type_name == "CancelAck") {
+      types.push_back(static_cast<int>(OmsEventType::CancelAck));
+    } else if (type_name == "CancelReject") {
+      types.push_back(static_cast<int>(OmsEventType::CancelReject));
+    } else if (type_name == "Fill") {
+      types.push_back(static_cast<int>(OmsEventType::Fill));
+    }
   }
   return types;
 }

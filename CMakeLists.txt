@@ -29,7 +29,8 @@ target_sources(exchange_server PRIVATE
   services/coordination/coordinator_event_sink.cpp
   services/coordination/coordinator_metrics.cpp
   services/recovery/recovery.cpp
-  services/recovery/journal_sink.cpp
+  services/recovery/journal_format.cpp
+  services/recovery/journal_replay.cpp
 )
 target_include_directories(exchange_server PRIVATE include)
 target_link_libraries(exchange_server PRIVATE protocol)
@@ -41,6 +42,13 @@ add_executable(oms_sim
 )
 target_include_directories(oms_sim PRIVATE include)
 target_link_libraries(oms_sim PRIVATE protocol)
+
+add_executable(journal_bench
+  tools/journal_bench.cpp
+  services/recovery/journal_format.cpp
+)
+target_include_directories(journal_bench PRIVATE include services/recovery)
+target_link_libraries(journal_bench PRIVATE protocol)
 
 #Tests
 include(FetchContent)
@@ -72,7 +80,8 @@ add_executable(order_coordinator_tests
   services/coordination/order_coordinator.cpp
   services/coordination/coordinator_event_sink.cpp
   services/recovery/recovery.cpp
-  services/recovery/journal_sink.cpp
+  services/recovery/journal_format.cpp
+  services/recovery/journal_replay.cpp
   services/oms/oms.cpp
   services/exchange/exchange.cpp
 )
@@ -89,13 +98,25 @@ target_link_libraries(coordinator_metrics_tests PRIVATE GTest::gtest_main protoc
 
 add_executable(journal_sink_tests
   tests/test_journal_sink.cpp
-  services/recovery/journal_sink.cpp
   services/recovery/recovery.cpp
+  services/recovery/journal_format.cpp
+  services/recovery/journal_replay.cpp
   services/oms/oms.cpp
   services/exchange/exchange.cpp
 )
 target_include_directories(journal_sink_tests PRIVATE include)
 target_link_libraries(journal_sink_tests PRIVATE GTest::gtest_main protocol)
+
+add_executable(recovery_tests
+  tests/test_recovery.cpp
+  services/recovery/recovery.cpp
+  services/recovery/journal_format.cpp
+  services/recovery/journal_replay.cpp
+  services/oms/oms.cpp
+  services/exchange/exchange.cpp
+)
+target_include_directories(recovery_tests PRIVATE include)
+target_link_libraries(recovery_tests PRIVATE GTest::gtest_main protocol)
 
 add_executable(server_integration_tests
   tests/test_server_integration.cpp
@@ -113,4 +134,5 @@ gtest_discover_tests(oms_tests)
 gtest_discover_tests(order_coordinator_tests)
 gtest_discover_tests(coordinator_metrics_tests)
 gtest_discover_tests(journal_sink_tests)
+gtest_discover_tests(recovery_tests)
 gtest_discover_tests(server_integration_tests)

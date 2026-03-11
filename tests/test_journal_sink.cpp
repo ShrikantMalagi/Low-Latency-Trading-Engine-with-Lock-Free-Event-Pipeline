@@ -71,7 +71,7 @@ TEST(AsyncJournalSink, BurstDropsWhenCapacityIsExceededAndReplayStaysConsistent)
   EXPECT_EQ(persisted, accepted);
 
   hft::Oms recovered;
-  ASSERT_TRUE(hft::replay_journal(journal_path, recovered));
+  ASSERT_TRUE(hft::replay_journal(journal_path, recovered).has_value());
 
   for (std::size_t i = 0; i < kTotalEvents; ++i) {
     const auto rec = recovered.get(100000u + static_cast<uint64_t>(i));

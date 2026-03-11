@@ -58,7 +58,8 @@ static void print_drain_totals(
 CoordinatorMetricsSnapshot snapshot(
     const CoordinatorMetrics& metrics,
     const QueueEventSink& event_sink,
-    const JournalSink* journal_sink) {
+    const JournalSink* journal_sink,
+    const RecoveryStatus* recovery_status) {
   return CoordinatorMetricsSnapshot{
       .event_type_counts = metrics.event_type_counts,
       .reject_reason_counts = metrics.reject_reason_counts,
@@ -68,6 +69,11 @@ CoordinatorMetricsSnapshot snapshot(
       .journal_flushed_events = journal_sink ? journal_sink->flushed() : 0,
       .journal_dropped_events = journal_sink ? journal_sink->dropped() : 0,
       .journal_queue_depth = journal_sink ? journal_sink->queue_depth() : 0,
+      .recovery_replay_attempted = recovery_status && recovery_status->replay_attempted ? 1u : 0u,
+      .recovery_replay_succeeded = recovery_status && recovery_status->replay_succeeded ? 1u : 0u,
+      .recovery_records_replayed = recovery_status ? recovery_status->records_replayed : 0u,
+      .recovery_error_code = recovery_status ? recovery_status->replay_error_code : 0u,
+      .recovery_error_line = recovery_status ? recovery_status->replay_error_line : 0u,
   };
 }
 

@@ -18,6 +18,7 @@ class JournalSink {
 public:
   virtual ~JournalSink() = default;
   virtual bool write(const OmsJournalEvent& event) = 0;
+  virtual void flush() {}
   virtual uint64_t enqueued() const { return 0; }
   virtual uint64_t flushed() const { return 0; }
   virtual uint64_t dropped() const { return 0; }
@@ -30,6 +31,7 @@ public:
   bool write(const OmsJournalEvent& event) override {
     return append_journal_event(path_, event);
   }
+  void flush() override {}
 
 private:
   std::string path_;
@@ -44,12 +46,12 @@ public:
         worker_(&AsyncJournalSink::run, this) {}
 
   ~AsyncJournalSink() override {
+    flush();
     stop_.store(true, std::memory_order_release);
-    cv_.notify_one();
+    cv_.notify_all();
     if (worker_.joinable()) {
       worker_.join();
     }
-    flush_remaining();
   }
 
   bool write(const OmsJournalEvent& event) override {
@@ -65,8 +67,15 @@ public:
     ring_[head] = event;
     head_.store(next, std::memory_order_release);
     enqueued_.fetch_add(1, std::memory_order_relaxed);
-    cv_.notify_one();
+    cv_.notify_all();
     return true;
+  }
+
+  void flush() override {
+    std::unique_lock<std::mutex> lock(m_);
+    cv_.wait(lock, [&] {
+      return queue_depth() == 0 && in_flight_.load(std::memory_order_acquire) == 0;
+    });
   }
 
   uint64_t enqueued() const override { return enqueued_.load(std::memory_order_relaxed); }
@@ -98,9 +107,12 @@ private:
   void flush_remaining() {
     OmsJournalEvent e{};
     while (pop_one(e)) {
+      in_flight_.fetch_add(1, std::memory_order_release);
       if (append_journal_event(path_, e)) {
         flushed_.fetch_add(1, std::memory_order_relaxed);
       }
+      in_flight_.fetch_sub(1, std::memory_order_release);
+      cv_.notify_all();
     }
   }
 
@@ -116,9 +128,12 @@ private:
 
       OmsJournalEvent e{};
       while (pop_one(e)) {
+        in_flight_.fetch_add(1, std::memory_order_release);
         if (append_journal_event(path_, e)) {
           flushed_.fetch_add(1, std::memory_order_relaxed);
         }
+        in_flight_.fetch_sub(1, std::memory_order_release);
+        cv_.notify_all();
       }
     }
   }
@@ -138,6 +153,7 @@ private:
   std::atomic<uint64_t> enqueued_{0};
   std::atomic<uint64_t> dropped_{0};
   std::atomic<uint64_t> flushed_{0};
+  std::atomic<uint64_t> in_flight_{0};
 };
 
 }

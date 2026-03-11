@@ -37,6 +37,33 @@ std::string make_temp_journal_path() {
   return std::string(tmp);
 }
 
+std::string read_all_from_fd(int fd) {
+  std::string out;
+  char buffer[512];
+  while (true) {
+    const ssize_t n = ::read(fd, buffer, sizeof(buffer));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    if (n == 0) {
+      break;
+    }
+    out.append(buffer, static_cast<std::size_t>(n));
+  }
+  return out;
+}
+
+void write_text_file(const std::string& path, const std::string& text) {
+  FILE* file = std::fopen(path.c_str(), "w");
+  ASSERT_NE(file, nullptr);
+  const std::size_t written = std::fwrite(text.data(), 1, text.size(), file);
+  ASSERT_EQ(written, text.size());
+  ASSERT_EQ(std::fclose(file), 0);
+}
+
 bool write_all(int fd, const void* buf, size_t n) {
   const auto* in = static_cast<const char*>(buf);
   size_t total = 0;
@@ -104,6 +131,7 @@ int connect_to_server() {
 class ServerFixture : public ::testing::Test {
 protected:
   virtual const char* EventSinkMaxQueueArg() const { return nullptr; }
+  virtual const char* JournalModeArg() const { return nullptr; }
 
   void SetUp() override {
     journal_path_ = make_temp_journal_path();
@@ -123,13 +151,29 @@ protected:
 
     if (server_pid_ == 0) {
       const char* max_queue_arg = EventSinkMaxQueueArg();
+      const char* journal_mode_arg = JournalModeArg();
       const std::string journal_arg = "--journal-path=" + journal_path_;
-      if (max_queue_arg != nullptr) {
+      if (max_queue_arg != nullptr && journal_mode_arg != nullptr) {
         ::execl(
             EXCHANGE_SERVER_PATH,
             EXCHANGE_SERVER_PATH,
             journal_arg.c_str(),
             max_queue_arg,
+            journal_mode_arg,
+            static_cast<char*>(nullptr));
+      } else if (max_queue_arg != nullptr) {
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            max_queue_arg,
+            static_cast<char*>(nullptr));
+      } else if (journal_mode_arg != nullptr) {
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            journal_mode_arg,
             static_cast<char*>(nullptr));
       } else {
         ::execl(
@@ -160,7 +204,19 @@ protected:
     if (server_pid_ > 0) {
       ::kill(server_pid_, SIGTERM);
       int status = 0;
-      ::waitpid(server_pid_, &status, 0);
+      bool exited = false;
+      for (int i = 0; i < 50; ++i) {
+        const pid_t waited = ::waitpid(server_pid_, &status, WNOHANG);
+        if (waited == server_pid_) {
+          exited = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if (!exited) {
+        ::kill(server_pid_, SIGKILL);
+        ::waitpid(server_pid_, &status, 0);
+      }
       server_pid_ = -1;
     }
   }
@@ -178,6 +234,11 @@ protected:
 class SmallQueueServerFixture : public ServerFixture {
 protected:
   const char* EventSinkMaxQueueArg() const override { return "--event-sink-max-queue=2"; }
+};
+
+class RecoveryServerFixture : public ServerFixture {
+protected:
+  const char* JournalModeArg() const override { return "--journal-mode=sync"; }
 };
 
 } 
@@ -773,6 +834,10 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   EXPECT_EQ(metrics.reject_reason_counts[2], 1u);
   EXPECT_GE(metrics.journal_enqueued_events, 2u);
   EXPECT_EQ(metrics.journal_dropped_events, 0u);
+  EXPECT_EQ(metrics.recovery_replay_attempted, 1u);
+  EXPECT_EQ(metrics.recovery_replay_succeeded, 1u);
+  EXPECT_EQ(metrics.recovery_error_code, 0u);
+  EXPECT_EQ(metrics.recovery_error_line, 0u);
 
   ::close(fd2);
 }
@@ -867,7 +932,7 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ::close(fd2);
 }
 
-TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecks) {
+TEST_F(RecoveryServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecks) {
   const int fd1 = OpenClient();
   ASSERT_GE(fd1, 0);
 
@@ -945,4 +1010,257 @@ TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecks) {
   ASSERT_EQ(cancel_ack.order_id, 30001u);
 
   ::close(fd2);
+}
+
+TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecksAsyncJournal) {
+  const int fd1 = OpenClient();
+  ASSERT_GE(fd1, 0);
+
+  const wire::Header new_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 311,
+  };
+  const wire::NewOrder new_msg{
+      .order_id = 31001,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd1, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd1, &new_msg, sizeof(new_msg)));
+
+  wire::Header ack_hdr{};
+  wire::Ack ack{};
+  ASSERT_TRUE(read_exact(fd1, &ack_hdr, sizeof(ack_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &ack, sizeof(ack)));
+  ASSERT_EQ(ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(ack.order_id, 31001u);
+
+  ::close(fd1);
+
+  StopServer();
+  StartServer();
+
+  const int fd2 = OpenClient();
+  ASSERT_GE(fd2, 0);
+
+  const wire::Header dup_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 312,
+  };
+  const wire::NewOrder dup_msg{
+      .order_id = 31001,
+      .side = 1,
+      .price = 101,
+      .qty = 2,
+  };
+
+  ASSERT_TRUE(write_all(fd2, &dup_hdr, sizeof(dup_hdr)));
+  ASSERT_TRUE(write_all(fd2, &dup_msg, sizeof(dup_msg)));
+
+  wire::Header dup_rej_hdr{};
+  wire::Reject dup_rej{};
+  ASSERT_TRUE(read_exact(fd2, &dup_rej_hdr, sizeof(dup_rej_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &dup_rej, sizeof(dup_rej)));
+  ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  ASSERT_EQ(dup_rej.order_id, 31001u);
+  ASSERT_EQ(dup_rej.reason, 6);
+
+  const wire::Header cancel_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::Cancel),
+      .length = static_cast<uint16_t>(sizeof(wire::Cancel)),
+      .seq = 313,
+  };
+  const wire::Cancel cancel_msg{
+      .order_id = 31001,
+  };
+
+  ASSERT_TRUE(write_all(fd2, &cancel_hdr, sizeof(cancel_hdr)));
+  ASSERT_TRUE(write_all(fd2, &cancel_msg, sizeof(cancel_msg)));
+
+  wire::Header cancel_ack_hdr{};
+  wire::Ack cancel_ack{};
+  ASSERT_TRUE(read_exact(fd2, &cancel_ack_hdr, sizeof(cancel_ack_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &cancel_ack, sizeof(cancel_ack)));
+  ASSERT_EQ(cancel_ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
+  ASSERT_EQ(cancel_ack_hdr.seq, 313);
+  ASSERT_EQ(cancel_ack.order_id, 31001u);
+
+  ::close(fd2);
+}
+
+TEST(ServerStartup, CorruptJournalStopsStartupAndReportsReplayFailure) {
+  const std::string journal_path = make_temp_journal_path();
+  write_text_file(
+      journal_path,
+      "HFTJ|version=1|len=50|type=SubmitNew|order_id=4001|side=0|price=100|qty=5|checksum=1\n");
+
+  int stderr_pipe[2]{};
+  ASSERT_EQ(::pipe(stderr_pipe), 0);
+
+  const pid_t pid = ::fork();
+  ASSERT_GE(pid, 0);
+
+  if (pid == 0) {
+    ::close(stderr_pipe[0]);
+    if (::dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+      _exit(126);
+    }
+    ::close(stderr_pipe[1]);
+
+    const std::string journal_arg = "--journal-path=" + journal_path;
+    ::execl(
+        EXCHANGE_SERVER_PATH,
+        EXCHANGE_SERVER_PATH,
+        journal_arg.c_str(),
+        static_cast<char*>(nullptr));
+    _exit(127);
+  }
+
+  ::close(stderr_pipe[1]);
+
+  int status = 0;
+  bool exited = false;
+  for (int i = 0; i < 50; ++i) {
+    const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+    if (waited == pid) {
+      exited = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (!exited) {
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &status, 0);
+  }
+
+  const std::string stderr_output = read_all_from_fd(stderr_pipe[0]);
+  ::close(stderr_pipe[0]);
+
+  ASSERT_TRUE(exited);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_NE(WEXITSTATUS(status), 0);
+  EXPECT_NE(stderr_output.find("fatal: replay_journal failed"), std::string::npos);
+  EXPECT_NE(stderr_output.find("line=1"), std::string::npos);
+
+  EXPECT_EQ(std::remove(journal_path.c_str()), 0);
+}
+
+TEST(ServerStartup, UnsupportedJournalVersionStopsStartupAndReportsReplayFailure) {
+  const std::string journal_path = make_temp_journal_path();
+  write_text_file(
+      journal_path,
+      "HFTJ|version=2|len=50|type=SubmitNew|order_id=4001|side=0|price=100|qty=5|checksum=1\n");
+
+  int stderr_pipe[2]{};
+  ASSERT_EQ(::pipe(stderr_pipe), 0);
+
+  const pid_t pid = ::fork();
+  ASSERT_GE(pid, 0);
+
+  if (pid == 0) {
+    ::close(stderr_pipe[0]);
+    if (::dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+      _exit(126);
+    }
+    ::close(stderr_pipe[1]);
+
+    const std::string journal_arg = "--journal-path=" + journal_path;
+    ::execl(
+        EXCHANGE_SERVER_PATH,
+        EXCHANGE_SERVER_PATH,
+        journal_arg.c_str(),
+        static_cast<char*>(nullptr));
+    _exit(127);
+  }
+
+  ::close(stderr_pipe[1]);
+
+  int status = 0;
+  bool exited = false;
+  for (int i = 0; i < 50; ++i) {
+    const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+    if (waited == pid) {
+      exited = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (!exited) {
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &status, 0);
+  }
+
+  const std::string stderr_output = read_all_from_fd(stderr_pipe[0]);
+  ::close(stderr_pipe[0]);
+
+  ASSERT_TRUE(exited);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_NE(WEXITSTATUS(status), 0);
+  EXPECT_NE(stderr_output.find("fatal: replay_journal failed"), std::string::npos);
+  EXPECT_NE(stderr_output.find("line=1"), std::string::npos);
+  EXPECT_NE(stderr_output.find("unsupported journal version"), std::string::npos);
+
+  EXPECT_EQ(std::remove(journal_path.c_str()), 0);
+}
+
+TEST(ServerStartup, BadJournalLengthStopsStartupAndReportsReplayFailure) {
+  const std::string journal_path = make_temp_journal_path();
+  write_text_file(
+      journal_path,
+      "HFTJ|version=1|len=999|type=SubmitNew|order_id=4001|side=0|price=100|qty=5|checksum=1\n");
+
+  int stderr_pipe[2]{};
+  ASSERT_EQ(::pipe(stderr_pipe), 0);
+
+  const pid_t pid = ::fork();
+  ASSERT_GE(pid, 0);
+
+  if (pid == 0) {
+    ::close(stderr_pipe[0]);
+    if (::dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+      _exit(126);
+    }
+    ::close(stderr_pipe[1]);
+
+    const std::string journal_arg = "--journal-path=" + journal_path;
+    ::execl(
+        EXCHANGE_SERVER_PATH,
+        EXCHANGE_SERVER_PATH,
+        journal_arg.c_str(),
+        static_cast<char*>(nullptr));
+    _exit(127);
+  }
+
+  ::close(stderr_pipe[1]);
+
+  int status = 0;
+  bool exited = false;
+  for (int i = 0; i < 50; ++i) {
+    const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+    if (waited == pid) {
+      exited = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (!exited) {
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &status, 0);
+  }
+
+  const std::string stderr_output = read_all_from_fd(stderr_pipe[0]);
+  ::close(stderr_pipe[0]);
+
+  ASSERT_TRUE(exited);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_NE(WEXITSTATUS(status), 0);
+  EXPECT_NE(stderr_output.find("fatal: replay_journal failed"), std::string::npos);
+  EXPECT_NE(stderr_output.find("line=1"), std::string::npos);
+  EXPECT_NE(stderr_output.find("payload shorter than declared length"), std::string::npos);
+
+  EXPECT_EQ(std::remove(journal_path.c_str()), 0);
 }
