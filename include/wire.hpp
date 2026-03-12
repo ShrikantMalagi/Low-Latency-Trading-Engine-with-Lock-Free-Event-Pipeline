@@ -53,7 +53,7 @@ namespace wire{
         uint64_t coordinator_queued_events;
         uint64_t journal_enqueued_events;
         uint64_t journal_flushed_events;
-        uint64_t journal_dropped_events;
+        uint64_t journal_backpressure_events;
         uint64_t journal_queue_depth;
         uint64_t recovery_replay_attempted;
         uint64_t recovery_replay_succeeded;

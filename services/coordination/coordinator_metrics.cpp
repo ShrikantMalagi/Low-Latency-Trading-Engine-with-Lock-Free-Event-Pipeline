@@ -67,7 +67,7 @@ CoordinatorMetricsSnapshot snapshot(
       .coordinator_queued_events = static_cast<uint64_t>(event_sink.size()),
       .journal_enqueued_events = journal_sink ? journal_sink->enqueued() : 0,
       .journal_flushed_events = journal_sink ? journal_sink->flushed() : 0,
-      .journal_dropped_events = journal_sink ? journal_sink->dropped() : 0,
+      .journal_backpressure_events = journal_sink ? journal_sink->backpressure_events() : 0,
       .journal_queue_depth = journal_sink ? journal_sink->queue_depth() : 0,
       .recovery_replay_attempted = recovery_status && recovery_status->replay_attempted ? 1u : 0u,
       .recovery_replay_succeeded = recovery_status && recovery_status->replay_succeeded ? 1u : 0u,

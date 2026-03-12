@@ -4,9 +4,11 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -35,14 +37,14 @@ std::size_t count_lines(const std::string& path) {
 
 }  // namespace
 
-TEST(AsyncJournalSink, BurstDropsWhenCapacityIsExceededAndReplayStaysConsistent) {
+TEST(AsyncJournalSink, FailFastReturnsBackpressureWhenCapacityIsExceeded) {
   constexpr std::size_t kCapacity = 8;
   constexpr std::size_t kTotalEvents = 20000;
 
   const std::string journal_path = make_temp_journal_path();
 
   std::size_t accepted = 0;
-  std::size_t dropped = 0;
+  std::size_t backpressure = 0;
   {
     hft::AsyncJournalSink sink(journal_path, kCapacity);
 
@@ -54,17 +56,17 @@ TEST(AsyncJournalSink, BurstDropsWhenCapacityIsExceededAndReplayStaysConsistent)
           .price = 100,
           .qty = 1,
       };
-      if (sink.write(event)) {
+      if (sink.write(event) == hft::JournalWriteResult::Enqueued) {
         ++accepted;
       } else {
-        ++dropped;
+        ++backpressure;
       }
     }
 
     EXPECT_EQ(sink.enqueued(), accepted);
-    EXPECT_EQ(sink.dropped(), dropped);
+    EXPECT_EQ(sink.backpressure_events(), backpressure);
     EXPECT_LT(accepted, kTotalEvents);
-    EXPECT_GT(dropped, 0u);
+    EXPECT_GT(backpressure, 0u);
   }
 
   const std::size_t persisted = count_lines(journal_path);
@@ -82,6 +84,42 @@ TEST(AsyncJournalSink, BurstDropsWhenCapacityIsExceededAndReplayStaysConsistent)
       EXPECT_EQ(rec->status, hft::OrderStatus::PendingNew);
     }
   }
+
+  EXPECT_EQ(std::remove(journal_path.c_str()), 0);
+}
+
+TEST(AsyncJournalSink, BlockPolicyAllowsProducerToWaitForSpace) {
+  const std::string journal_path = make_temp_journal_path();
+
+  hft::AsyncJournalSink sink(
+      journal_path,
+      /*capacity=*/2,
+      hft::BackpressurePolicy::Block);
+
+  const hft::OmsJournalEvent first{
+      .type = hft::OmsEventType::SubmitNew,
+      .order_id = 1,
+      .side = static_cast<uint8_t>(hft::Side::Buy),
+      .price = 100,
+      .qty = 1,
+  };
+  const hft::OmsJournalEvent second{
+      .type = hft::OmsEventType::SubmitNew,
+      .order_id = 2,
+      .side = static_cast<uint8_t>(hft::Side::Buy),
+      .price = 100,
+      .qty = 1,
+  };
+
+  ASSERT_EQ(sink.write(first), hft::JournalWriteResult::Enqueued);
+
+  hft::JournalWriteResult second_result = hft::JournalWriteResult::IoError;
+  std::thread writer([&] {
+    second_result = sink.write(second);
+  });
+
+  writer.join();
+  EXPECT_EQ(second_result, hft::JournalWriteResult::Enqueued);
 
   EXPECT_EQ(std::remove(journal_path.c_str()), 0);
 }

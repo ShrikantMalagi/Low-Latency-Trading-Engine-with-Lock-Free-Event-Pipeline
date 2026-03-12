@@ -18,13 +18,19 @@ std::expected<void, ExecReject> append_or_reject(
   const OmsJournalEvent& event,
   uint64_t order_id,
   std::string_view context) {
-  if (sink == nullptr || sink->write(event)) {
+  if (sink == nullptr) {
+    return {};
+  }
+  const auto result = sink->write(event);
+  if (result == JournalWriteResult::Enqueued) {
     return {};
   }
   return std::unexpected(ExecReject{
       .order_id = order_id,
       .reason = ExecRejectReason::InvalidTransition,
-      .message = context,
+      .message = result == JournalWriteResult::Backpressure
+          ? "journal backpressure"
+          : context,
   });
 }
 

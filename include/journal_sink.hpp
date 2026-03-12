@@ -14,22 +14,34 @@
 
 namespace hft {
 
+enum class JournalWriteResult : uint8_t {
+  Enqueued,
+  Backpressure,
+  IoError,
+};
+
+enum class BackpressurePolicy : uint8_t {
+  Block,
+  FailFast,
+};
+
 class JournalSink {
 public:
   virtual ~JournalSink() = default;
-  virtual bool write(const OmsJournalEvent& event) = 0;
+  virtual JournalWriteResult write(const OmsJournalEvent& event) = 0;
   virtual void flush() {}
   virtual uint64_t enqueued() const { return 0; }
   virtual uint64_t flushed() const { return 0; }
-  virtual uint64_t dropped() const { return 0; }
+  virtual uint64_t backpressure_events() const { return 0; }
   virtual uint64_t queue_depth() const { return 0; }
 };
 
 class SyncJournalSink final : public JournalSink {
 public:
   explicit SyncJournalSink(std::string path) : path_(std::move(path)) {}
-  bool write(const OmsJournalEvent& event) override {
-    return append_journal_event(path_, event);
+  JournalWriteResult write(const OmsJournalEvent& event) override {
+    return append_journal_event(path_, event) ? JournalWriteResult::Enqueued
+                                              : JournalWriteResult::IoError;
   }
   void flush() override {}
 
@@ -39,10 +51,14 @@ private:
 
 class AsyncJournalSink final : public JournalSink {
 public:
-  AsyncJournalSink(std::string path, std::size_t capacity = 8192)
+  AsyncJournalSink(
+      std::string path,
+      std::size_t capacity = 8192,
+      BackpressurePolicy policy = BackpressurePolicy::FailFast)
       : path_(std::move(path)),
         capacity_(capacity == 0 ? 1 : capacity),
         ring_(capacity_),
+        policy_(policy),
         worker_(&AsyncJournalSink::run, this) {}
 
   ~AsyncJournalSink() override {
@@ -54,21 +70,33 @@ public:
     }
   }
 
-  bool write(const OmsJournalEvent& event) override {
-    const auto head = head_.load(std::memory_order_relaxed);
-    const auto next = increment(head);
-    const auto tail = tail_.load(std::memory_order_acquire);
+  JournalWriteResult write(const OmsJournalEvent& event) override {
+    while (true) {
+      const auto head = head_.load(std::memory_order_relaxed);
+      const auto next = increment(head);
+      const auto tail = tail_.load(std::memory_order_acquire);
 
-    if (next == tail) {
-      dropped_.fetch_add(1, std::memory_order_relaxed);
-      return false;
+      if (next != tail) {
+        ring_[head] = event;
+        head_.store(next, std::memory_order_release);
+        enqueued_.fetch_add(1, std::memory_order_relaxed);
+        cv_.notify_all();
+        return JournalWriteResult::Enqueued;
+      }
+
+      backpressure_events_.fetch_add(1, std::memory_order_relaxed);
+      if (policy_ == BackpressurePolicy::FailFast || stop_.load(std::memory_order_acquire)) {
+        return JournalWriteResult::Backpressure;
+      }
+
+      std::unique_lock<std::mutex> lock(m_);
+      cv_.wait(lock, [&] {
+        return stop_.load(std::memory_order_acquire) || queue_depth() < capacity_ - 1;
+      });
+      if (stop_.load(std::memory_order_acquire)) {
+        return JournalWriteResult::Backpressure;
+      }
     }
-
-    ring_[head] = event;
-    head_.store(next, std::memory_order_release);
-    enqueued_.fetch_add(1, std::memory_order_relaxed);
-    cv_.notify_all();
-    return true;
   }
 
   void flush() override {
@@ -79,7 +107,9 @@ public:
   }
 
   uint64_t enqueued() const override { return enqueued_.load(std::memory_order_relaxed); }
-  uint64_t dropped() const override { return dropped_.load(std::memory_order_relaxed); }
+  uint64_t backpressure_events() const override {
+    return backpressure_events_.load(std::memory_order_relaxed);
+  }
   uint64_t flushed() const override { return flushed_.load(std::memory_order_relaxed); }
   uint64_t queue_depth() const override {
     const auto head = head_.load(std::memory_order_acquire);
@@ -141,6 +171,7 @@ private:
   std::string path_;
   std::size_t capacity_;
   std::vector<OmsJournalEvent> ring_;
+  BackpressurePolicy policy_;
 
   alignas(64) std::atomic<std::size_t> head_{0};
   alignas(64) std::atomic<std::size_t> tail_{0};
@@ -151,7 +182,7 @@ private:
   std::condition_variable cv_;
 
   std::atomic<uint64_t> enqueued_{0};
-  std::atomic<uint64_t> dropped_{0};
+  std::atomic<uint64_t> backpressure_events_{0};
   std::atomic<uint64_t> flushed_{0};
   std::atomic<uint64_t> in_flight_{0};
 };

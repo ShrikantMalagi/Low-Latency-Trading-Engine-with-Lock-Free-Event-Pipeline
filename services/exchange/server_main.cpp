@@ -63,9 +63,16 @@ namespace{
         InvalidQuantity = 4,
         InvalidPrice = 5,
         DuplicateOrderId = 6,
+        JournalBackpressure = 7,
     };
 
-    RejectReason to_wire_reject_reason(hft::ExecRejectReason reason) {
+    RejectReason to_wire_reject_reason(const hft::ExecReject& reject) {
+        if (reject.reason == hft::ExecRejectReason::InvalidTransition &&
+            reject.message == "journal backpressure") {
+            return RejectReason::JournalBackpressure;
+        }
+
+        const auto reason = reject.reason;
         switch (reason) {
             case hft::ExecRejectReason::DuplicateOrderId:
             return RejectReason::DuplicateOrderId;
@@ -110,6 +117,22 @@ namespace{
             return false;
         }
         return std::string_view(raw) == "sync";
+    }
+
+    std::size_t parse_journal_queue_capacity(int argc, char* argv[]) {
+        constexpr std::size_t kDefaultJournalQueueCapacity = 16384;
+        const char* raw = find_arg_value(argc, argv, "--journal-queue-capacity=");
+        if (raw == nullptr || raw[0] == '\0') {
+            return kDefaultJournalQueueCapacity;
+        }
+
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed == 0) {
+            return kDefaultJournalQueueCapacity;
+        }
+
+        return static_cast<std::size_t>(parsed);
     }
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -343,7 +366,7 @@ namespace{
                 client_fd,
                 seq,
                 rej.order_id,
-                to_wire_reject_reason(rej.reason)
+                to_wire_reject_reason(rej)
             );
         }
     
@@ -381,7 +404,7 @@ namespace{
                 client_fd,
                 seq,
                 rej.order_id,
-                to_wire_reject_reason(rej.reason)
+                to_wire_reject_reason(rej)
             );
         }
 
@@ -465,7 +488,7 @@ namespace{
         out.coordinator_queued_events = s.coordinator_queued_events;
         out.journal_enqueued_events = s.journal_enqueued_events;
         out.journal_flushed_events = s.journal_flushed_events;
-        out.journal_dropped_events = s.journal_dropped_events;
+        out.journal_backpressure_events = s.journal_backpressure_events;
         out.journal_queue_depth = s.journal_queue_depth;
         out.recovery_replay_attempted = s.recovery_replay_attempted;
         out.recovery_replay_succeeded = s.recovery_replay_succeeded;
@@ -511,7 +534,10 @@ int main(int argc, char* argv[])
     if (use_sync_journal(argc, argv)) {
         journal_sink = std::make_unique<hft::SyncJournalSink>(journal_path);
     } else {
-        journal_sink = std::make_unique<hft::AsyncJournalSink>(journal_path, 16384);
+        journal_sink = std::make_unique<hft::AsyncJournalSink>(
+            journal_path,
+            parse_journal_queue_capacity(argc, argv),
+            hft::BackpressurePolicy::FailFast);
     }
     recovery_status.replay_attempted = true;
     const auto replay_result = hft::replay_journal(journal_path, oms);
