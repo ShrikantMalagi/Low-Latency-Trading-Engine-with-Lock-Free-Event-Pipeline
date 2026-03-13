@@ -56,33 +56,23 @@ namespace{
         return nullptr;
     }
 
-    enum class RejectReason : uint16_t {
-        InvalidMessage = 1,
-        InvalidSide = 2,
-        CancelNotFound = 3,
-        InvalidQuantity = 4,
-        InvalidPrice = 5,
-        DuplicateOrderId = 6,
-        JournalBackpressure = 7,
-    };
-
-    RejectReason to_wire_reject_reason(const hft::ExecReject& reject) {
+    wire::RejectReason to_wire_reject_reason(const hft::ExecReject& reject) {
         if (reject.reason == hft::ExecRejectReason::InvalidTransition &&
             reject.message == "journal backpressure") {
-            return RejectReason::JournalBackpressure;
+            return wire::RejectReason::JournalBackpressure;
         }
 
         const auto reason = reject.reason;
         switch (reason) {
             case hft::ExecRejectReason::DuplicateOrderId:
-            return RejectReason::DuplicateOrderId;
+                return wire::RejectReason::DuplicateOrderId;
             case hft::ExecRejectReason::UnknownOrderId:
-                return RejectReason::CancelNotFound;
+                return wire::RejectReason::CancelNotFound;
             case hft::ExecRejectReason::InvalidTransition:
-                return RejectReason::InvalidMessage;
+                return wire::RejectReason::InvalidMessage;
             case hft::ExecRejectReason::InvalidOrder:
             default:
-                return RejectReason::InvalidMessage;
+                return wire::RejectReason::InvalidMessage;
         }
     }
 
@@ -310,7 +300,7 @@ namespace{
         int fd,
         uint16_t seq,
         uint64_t order_id,
-        RejectReason reason
+        wire::RejectReason reason
     ) {
         wire::Reject reject{
             .order_id = order_id,
@@ -341,15 +331,15 @@ namespace{
         }
 
         if(msg.side > static_cast<uint8_t>(hft::Side::Sell)){
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidSide);
+            return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidSide);
         }
 
         if (msg.qty <= 0) {
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidQuantity);
+            return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidQuantity);
         }
 
         if (msg.price <= 0) {
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidPrice);
+            return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidPrice);
         }     
 
         hft::Order order{
@@ -413,7 +403,7 @@ namespace{
             return send_ack(client_fd, seq, msg.order_id);
         }
 
-        return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidMessage);
+        return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidMessage);
     }
     
     std::expected<void, hft::Error> handle_client(
@@ -435,7 +425,7 @@ namespace{
             switch (type) {
                 case wire::MsgType::NewOrder:
                     if (header.length != sizeof(wire::NewOrder)) {
-                        return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                        return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
                     }
     
                     if (auto result = handle_new_order(client_fd, header.seq, coordinator); !result) {
@@ -445,7 +435,7 @@ namespace{
     
                 case wire::MsgType::Cancel:
                     if (header.length != sizeof(wire::Cancel)) {
-                        return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                        return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
                     }
     
                     if (auto result = handle_cancel(client_fd, header.seq, coordinator); !result) {
@@ -455,7 +445,7 @@ namespace{
 
                 case wire::MsgType::GetMetrics:
                     if (header.length != 0) {
-                      return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                      return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
                     }
                     if (auto r = handle_get_metrics(client_fd, header.seq, metrics, event_sink, journal_sink, recovery_status); !r) {
                       return r;
@@ -463,7 +453,7 @@ namespace{
                     break;
     
                 default:
-                    return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                    return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
             }
         }
     }

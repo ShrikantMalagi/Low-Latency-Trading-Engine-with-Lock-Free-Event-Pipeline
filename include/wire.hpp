@@ -11,6 +11,16 @@ namespace wire{
         GetMetrics = 100,
         MetricsSnapshot = 101
     };
+
+    enum class RejectReason : uint16_t {
+        InvalidMessage = 1,
+        InvalidSide = 2,
+        CancelNotFound = 3,
+        InvalidQuantity = 4,
+        InvalidPrice = 5,
+        DuplicateOrderId = 6,
+        JournalBackpressure = 7,
+    };
     
     #pragma pack(push, 1)
 

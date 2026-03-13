@@ -492,7 +492,7 @@ TEST_F(ServerFixture, CancelMissingOrderReturnsReject) {
   EXPECT_EQ(reply_hdr.length, sizeof(wire::Reject));
   EXPECT_EQ(reply_hdr.seq, 41);
   EXPECT_EQ(reply.order_id, 5555u);
-  EXPECT_EQ(reply.reason, 3);
+  EXPECT_EQ(reply.reason, static_cast<uint16_t>(wire::RejectReason::CancelNotFound));
 
   ::close(fd);
 }
@@ -641,7 +641,7 @@ TEST_F(ServerFixture, DuplicateOrderIdReturnsReject) {
   EXPECT_EQ(reject_hdr.length, sizeof(wire::Reject));
   EXPECT_EQ(reject_hdr.seq, 62);
   EXPECT_EQ(reject.order_id, 3001u);
-  EXPECT_EQ(reject.reason, 6);
+  EXPECT_EQ(reject.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   ::close(fd);
 }
@@ -761,7 +761,7 @@ TEST_F(ServerFixture, DuplicateOrderIdStillRejectsAfterCoordinatorIntegration) {
   EXPECT_EQ(rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   EXPECT_EQ(rej_hdr.seq, 82);
   EXPECT_EQ(rej.order_id, 8101u);
-  EXPECT_EQ(rej.reason, 6);
+  EXPECT_EQ(rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   ::close(fd);
 }
@@ -810,7 +810,7 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   ASSERT_TRUE(read_exact(fd1, &dup_rej_hdr, sizeof(dup_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -828,7 +828,7 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   ASSERT_TRUE(read_exact(fd1, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &cancel_rej, sizeof(cancel_rej)));
   ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(cancel_rej.reason, 3);
+  ASSERT_EQ(cancel_rej.reason, static_cast<uint16_t>(wire::RejectReason::CancelNotFound));
 
   ::close(fd1);
 
@@ -925,7 +925,7 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ASSERT_TRUE(read_exact(fd1, &dup_rej_hdr, sizeof(dup_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -943,7 +943,7 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ASSERT_TRUE(read_exact(fd1, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &cancel_rej, sizeof(cancel_rej)));
   ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(cancel_rej.reason, 3);
+  ASSERT_EQ(cancel_rej.reason, static_cast<uint16_t>(wire::RejectReason::CancelNotFound));
 
   ::close(fd1);
 
@@ -998,7 +998,7 @@ TEST_F(TinyJournalQueueServerFixture, JournalBackpressureRejectsRequestAndEmitsI
   EXPECT_EQ(rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   EXPECT_EQ(rej_hdr.seq, 211);
   EXPECT_EQ(rej.order_id, 21001u);
-  EXPECT_EQ(rej.reason, 7);
+  EXPECT_EQ(rej.reason, static_cast<uint16_t>(wire::RejectReason::JournalBackpressure));
 
   ::close(fd1);
 
@@ -1080,7 +1080,7 @@ TEST_F(RecoveryServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelCheck
   ASSERT_TRUE(read_exact(fd2, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   ASSERT_EQ(dup_rej.order_id, 30001u);
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -1160,7 +1160,7 @@ TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecksAsyncJo
   ASSERT_TRUE(read_exact(fd2, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   ASSERT_EQ(dup_rej.order_id, 31001u);
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -1195,8 +1195,11 @@ TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecksAsyncJo
   ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
   ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
   ASSERT_EQ(metrics_hdr.seq, 314);
+  EXPECT_EQ(metrics.journal_backpressure_events, 0u);
+  EXPECT_EQ(metrics.recovery_replay_attempted, 1u);
   EXPECT_EQ(metrics.recovery_replay_succeeded, 1u);
   EXPECT_GT(metrics.recovery_records_replayed, 0u);
+  EXPECT_EQ(metrics.recovery_error_code, 0u);
 
   ::close(fd2);
 }
