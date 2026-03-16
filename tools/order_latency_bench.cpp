@@ -15,6 +15,11 @@
 #include <algorithm>
 
 namespace {
+struct Sample {
+  int order_index;
+  uint64_t latency_ns;
+};
+
 bool write_all(int fd, const void* buf, std::size_t n) {
   const auto* p = static_cast<const char*>(buf);
   std::size_t off = 0;
@@ -61,6 +66,31 @@ double percentile(std::vector<uint64_t> values, double p) {
   return static_cast<double>(values[idx]);
 }
 
+std::vector<Sample> slowest_samples(const std::vector<Sample>& samples, std::size_t limit) {
+  std::vector<Sample> slowest = samples;
+  std::sort(slowest.begin(), slowest.end(), [](const Sample& lhs, const Sample& rhs) {
+    if (lhs.latency_ns != rhs.latency_ns) {
+      return lhs.latency_ns > rhs.latency_ns;
+    }
+    return lhs.order_index < rhs.order_index;
+  });
+  if (slowest.size() > limit) {
+    slowest.resize(limit);
+  }
+  return slowest;
+}
+
+void print_slowest_samples(const std::vector<Sample>& samples, std::size_t limit) {
+  const auto slowest = slowest_samples(samples, limit);
+  for (const auto& sample : slowest) {
+    std::printf(
+        "slow_sample order=%d latency_ns=%llu latency_us=%.3f\n",
+        sample.order_index,
+        static_cast<unsigned long long>(sample.latency_ns),
+        static_cast<double>(sample.latency_ns) / 1000.0);
+  }
+}
+
 bool set_socket_timeout(int fd, int seconds) {
   timeval tv{};
   tv.tv_sec = seconds;
@@ -72,10 +102,20 @@ bool set_socket_timeout(int fd, int seconds) {
 
 int main(int argc, char* argv[]) {
   int order_count = 1000;
+  uint64_t order_id_base =
+      static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+
   if (argc > 1) {
     order_count = std::atoi(argv[1]);
     if (order_count <= 0) {
       std::fprintf(stderr, "invalid order count: %s\n", argv[1]);
+      return 1;
+    }
+  }
+  if (argc > 2) {
+    order_id_base = std::strtoull(argv[2], nullptr, 10);
+    if (order_id_base == 0) {
+      std::fprintf(stderr, "invalid order id base: %s\n", argv[2]);
       return 1;
     }
   }
@@ -94,10 +134,14 @@ int main(int argc, char* argv[]) {
 
   std::vector<uint64_t> latencies;
   latencies.reserve(static_cast<std::size_t>(order_count));
+  std::vector<Sample> samples;
+  samples.reserve(static_cast<std::size_t>(order_count));
   std::size_t ack_count = 0;
   std::size_t reject_count = 0;
 
   const auto bench_start = std::chrono::steady_clock::now();
+
+  std::printf("order_id_base=%llu\n", static_cast<unsigned long long>(order_id_base));
 
   for (int i = 0; i < order_count; ++i) {
     wire::Header hdr{
@@ -106,7 +150,7 @@ int main(int argc, char* argv[]) {
       .seq = static_cast<uint16_t>(i),
     };
     wire::NewOrder msg{
-      .order_id = static_cast<uint64_t>(100000 + i),
+      .order_id = order_id_base + static_cast<uint64_t>(i),
       .side = 0,
       .price = 100,
       .qty = 1,
@@ -177,6 +221,10 @@ int main(int argc, char* argv[]) {
     const auto t1 = std::chrono::steady_clock::now();
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     latencies.push_back(static_cast<uint64_t>(ns));
+    samples.push_back(Sample{
+        .order_index = i,
+        .latency_ns = static_cast<uint64_t>(ns),
+    });
   }
 
   const auto bench_end = std::chrono::steady_clock::now();
@@ -200,6 +248,10 @@ int main(int argc, char* argv[]) {
   std::printf("p99_us=%.3f\n", percentile(latencies, 0.99) / 1000.0);
   std::printf("throughput_ops_s=%.0f\n",
       (static_cast<double>(latencies.size()) * 1'000'000'000.0) / static_cast<double>(total_ns));
+  print_slowest_samples(samples, 10);
+  if (reject_count > 0) {
+    std::fprintf(stderr, "benchmark encountered rejects; accepted-path latency is contaminated\n");
+  }
 
   ::close(fd);
   return 0;
