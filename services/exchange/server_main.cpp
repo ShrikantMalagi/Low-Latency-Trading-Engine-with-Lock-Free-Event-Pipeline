@@ -56,26 +56,23 @@ namespace{
         return nullptr;
     }
 
-    enum class RejectReason : uint16_t {
-        InvalidMessage = 1,
-        InvalidSide = 2,
-        CancelNotFound = 3,
-        InvalidQuantity = 4,
-        InvalidPrice = 5,
-        DuplicateOrderId = 6,
-    };
+    wire::RejectReason to_wire_reject_reason(const hft::ExecReject& reject) {
+        if (reject.reason == hft::ExecRejectReason::InvalidTransition &&
+            reject.message == "journal backpressure") {
+            return wire::RejectReason::JournalBackpressure;
+        }
 
-    RejectReason to_wire_reject_reason(hft::ExecRejectReason reason) {
+        const auto reason = reject.reason;
         switch (reason) {
             case hft::ExecRejectReason::DuplicateOrderId:
-            return RejectReason::DuplicateOrderId;
+                return wire::RejectReason::DuplicateOrderId;
             case hft::ExecRejectReason::UnknownOrderId:
-                return RejectReason::CancelNotFound;
+                return wire::RejectReason::CancelNotFound;
             case hft::ExecRejectReason::InvalidTransition:
-                return RejectReason::InvalidMessage;
+                return wire::RejectReason::InvalidMessage;
             case hft::ExecRejectReason::InvalidOrder:
             default:
-                return RejectReason::InvalidMessage;
+                return wire::RejectReason::InvalidMessage;
         }
     }
 
@@ -110,6 +107,22 @@ namespace{
             return false;
         }
         return std::string_view(raw) == "sync";
+    }
+
+    std::size_t parse_journal_queue_capacity(int argc, char* argv[]) {
+        constexpr std::size_t kDefaultJournalQueueCapacity = 16384;
+        const char* raw = find_arg_value(argc, argv, "--journal-queue-capacity=");
+        if (raw == nullptr || raw[0] == '\0') {
+            return kDefaultJournalQueueCapacity;
+        }
+
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed == 0) {
+            return kDefaultJournalQueueCapacity;
+        }
+
+        return static_cast<std::size_t>(parsed);
     }
 
     std::expected<int, hft::Error> make_listen_socket(int port) {
@@ -287,7 +300,7 @@ namespace{
         int fd,
         uint16_t seq,
         uint64_t order_id,
-        RejectReason reason
+        wire::RejectReason reason
     ) {
         wire::Reject reject{
             .order_id = order_id,
@@ -318,15 +331,15 @@ namespace{
         }
 
         if(msg.side > static_cast<uint8_t>(hft::Side::Sell)){
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidSide);
+            return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidSide);
         }
 
         if (msg.qty <= 0) {
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidQuantity);
+            return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidQuantity);
         }
 
         if (msg.price <= 0) {
-            return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidPrice);
+            return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidPrice);
         }     
 
         hft::Order order{
@@ -343,7 +356,7 @@ namespace{
                 client_fd,
                 seq,
                 rej.order_id,
-                to_wire_reject_reason(rej.reason)
+                to_wire_reject_reason(rej)
             );
         }
     
@@ -381,7 +394,7 @@ namespace{
                 client_fd,
                 seq,
                 rej.order_id,
-                to_wire_reject_reason(rej.reason)
+                to_wire_reject_reason(rej)
             );
         }
 
@@ -390,7 +403,7 @@ namespace{
             return send_ack(client_fd, seq, msg.order_id);
         }
 
-        return send_reject(client_fd, seq, msg.order_id, RejectReason::InvalidMessage);
+        return send_reject(client_fd, seq, msg.order_id, wire::RejectReason::InvalidMessage);
     }
     
     std::expected<void, hft::Error> handle_client(
@@ -412,7 +425,7 @@ namespace{
             switch (type) {
                 case wire::MsgType::NewOrder:
                     if (header.length != sizeof(wire::NewOrder)) {
-                        return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                        return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
                     }
     
                     if (auto result = handle_new_order(client_fd, header.seq, coordinator); !result) {
@@ -422,7 +435,7 @@ namespace{
     
                 case wire::MsgType::Cancel:
                     if (header.length != sizeof(wire::Cancel)) {
-                        return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                        return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
                     }
     
                     if (auto result = handle_cancel(client_fd, header.seq, coordinator); !result) {
@@ -432,7 +445,7 @@ namespace{
 
                 case wire::MsgType::GetMetrics:
                     if (header.length != 0) {
-                      return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                      return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
                     }
                     if (auto r = handle_get_metrics(client_fd, header.seq, metrics, event_sink, journal_sink, recovery_status); !r) {
                       return r;
@@ -440,7 +453,7 @@ namespace{
                     break;
     
                 default:
-                    return send_reject(client_fd, header.seq, 0, RejectReason::InvalidMessage);
+                    return send_reject(client_fd, header.seq, 0, wire::RejectReason::InvalidMessage);
             }
         }
     }
@@ -465,7 +478,7 @@ namespace{
         out.coordinator_queued_events = s.coordinator_queued_events;
         out.journal_enqueued_events = s.journal_enqueued_events;
         out.journal_flushed_events = s.journal_flushed_events;
-        out.journal_dropped_events = s.journal_dropped_events;
+        out.journal_backpressure_events = s.journal_backpressure_events;
         out.journal_queue_depth = s.journal_queue_depth;
         out.recovery_replay_attempted = s.recovery_replay_attempted;
         out.recovery_replay_succeeded = s.recovery_replay_succeeded;
@@ -511,7 +524,10 @@ int main(int argc, char* argv[])
     if (use_sync_journal(argc, argv)) {
         journal_sink = std::make_unique<hft::SyncJournalSink>(journal_path);
     } else {
-        journal_sink = std::make_unique<hft::AsyncJournalSink>(journal_path, 16384);
+        journal_sink = std::make_unique<hft::AsyncJournalSink>(
+            journal_path,
+            parse_journal_queue_capacity(argc, argv),
+            hft::BackpressurePolicy::FailFast);
     }
     recovery_status.replay_attempted = true;
     const auto replay_result = hft::replay_journal(journal_path, oms);

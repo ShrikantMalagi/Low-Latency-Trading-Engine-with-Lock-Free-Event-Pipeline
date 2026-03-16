@@ -50,6 +50,12 @@ add_executable(journal_bench
 target_include_directories(journal_bench PRIVATE include services/recovery)
 target_link_libraries(journal_bench PRIVATE protocol)
 
+add_executable(order_latency_bench
+  tools/order_latency_bench.cpp
+)
+target_include_directories(order_latency_bench PRIVATE include)
+target_link_libraries(order_latency_bench PRIVATE protocol)
+
 #Tests
 include(FetchContent)
 FetchContent_Declare(

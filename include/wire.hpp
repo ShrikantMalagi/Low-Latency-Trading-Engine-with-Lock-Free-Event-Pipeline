@@ -11,6 +11,16 @@ namespace wire{
         GetMetrics = 100,
         MetricsSnapshot = 101
     };
+
+    enum class RejectReason : uint16_t {
+        InvalidMessage = 1,
+        InvalidSide = 2,
+        CancelNotFound = 3,
+        InvalidQuantity = 4,
+        InvalidPrice = 5,
+        DuplicateOrderId = 6,
+        JournalBackpressure = 7,
+    };
     
     #pragma pack(push, 1)
 
@@ -53,7 +63,7 @@ namespace wire{
         uint64_t coordinator_queued_events;
         uint64_t journal_enqueued_events;
         uint64_t journal_flushed_events;
-        uint64_t journal_dropped_events;
+        uint64_t journal_backpressure_events;
         uint64_t journal_queue_depth;
         uint64_t recovery_replay_attempted;
         uint64_t recovery_replay_succeeded;

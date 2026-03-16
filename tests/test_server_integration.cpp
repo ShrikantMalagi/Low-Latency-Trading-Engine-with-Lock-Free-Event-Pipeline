@@ -132,6 +132,7 @@ class ServerFixture : public ::testing::Test {
 protected:
   virtual const char* EventSinkMaxQueueArg() const { return nullptr; }
   virtual const char* JournalModeArg() const { return nullptr; }
+  virtual const char* JournalQueueCapacityArg() const { return nullptr; }
 
   void SetUp() override {
     journal_path_ = make_temp_journal_path();
@@ -152,14 +153,40 @@ protected:
     if (server_pid_ == 0) {
       const char* max_queue_arg = EventSinkMaxQueueArg();
       const char* journal_mode_arg = JournalModeArg();
+      const char* journal_queue_capacity_arg = JournalQueueCapacityArg();
       const std::string journal_arg = "--journal-path=" + journal_path_;
-      if (max_queue_arg != nullptr && journal_mode_arg != nullptr) {
+      if (max_queue_arg != nullptr && journal_mode_arg != nullptr && journal_queue_capacity_arg != nullptr) {
         ::execl(
             EXCHANGE_SERVER_PATH,
             EXCHANGE_SERVER_PATH,
             journal_arg.c_str(),
             max_queue_arg,
             journal_mode_arg,
+            journal_queue_capacity_arg,
+            static_cast<char*>(nullptr));
+      } else if (max_queue_arg != nullptr && journal_mode_arg != nullptr) {
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            max_queue_arg,
+            journal_mode_arg,
+            static_cast<char*>(nullptr));
+      } else if (max_queue_arg != nullptr && journal_queue_capacity_arg != nullptr) {
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            max_queue_arg,
+            journal_queue_capacity_arg,
+            static_cast<char*>(nullptr));
+      } else if (journal_mode_arg != nullptr && journal_queue_capacity_arg != nullptr) {
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            journal_mode_arg,
+            journal_queue_capacity_arg,
             static_cast<char*>(nullptr));
       } else if (max_queue_arg != nullptr) {
         ::execl(
@@ -174,6 +201,13 @@ protected:
             EXCHANGE_SERVER_PATH,
             journal_arg.c_str(),
             journal_mode_arg,
+            static_cast<char*>(nullptr));
+      } else if (journal_queue_capacity_arg != nullptr) {
+        ::execl(
+            EXCHANGE_SERVER_PATH,
+            EXCHANGE_SERVER_PATH,
+            journal_arg.c_str(),
+            journal_queue_capacity_arg,
             static_cast<char*>(nullptr));
       } else {
         ::execl(
@@ -239,6 +273,11 @@ protected:
 class RecoveryServerFixture : public ServerFixture {
 protected:
   const char* JournalModeArg() const override { return "--journal-mode=sync"; }
+};
+
+class TinyJournalQueueServerFixture : public ServerFixture {
+protected:
+  const char* JournalQueueCapacityArg() const override { return "--journal-queue-capacity=1"; }
 };
 
 } 
@@ -453,7 +492,7 @@ TEST_F(ServerFixture, CancelMissingOrderReturnsReject) {
   EXPECT_EQ(reply_hdr.length, sizeof(wire::Reject));
   EXPECT_EQ(reply_hdr.seq, 41);
   EXPECT_EQ(reply.order_id, 5555u);
-  EXPECT_EQ(reply.reason, 3);
+  EXPECT_EQ(reply.reason, static_cast<uint16_t>(wire::RejectReason::CancelNotFound));
 
   ::close(fd);
 }
@@ -602,7 +641,7 @@ TEST_F(ServerFixture, DuplicateOrderIdReturnsReject) {
   EXPECT_EQ(reject_hdr.length, sizeof(wire::Reject));
   EXPECT_EQ(reject_hdr.seq, 62);
   EXPECT_EQ(reject.order_id, 3001u);
-  EXPECT_EQ(reject.reason, 6);
+  EXPECT_EQ(reject.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   ::close(fd);
 }
@@ -722,7 +761,7 @@ TEST_F(ServerFixture, DuplicateOrderIdStillRejectsAfterCoordinatorIntegration) {
   EXPECT_EQ(rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   EXPECT_EQ(rej_hdr.seq, 82);
   EXPECT_EQ(rej.order_id, 8101u);
-  EXPECT_EQ(rej.reason, 6);
+  EXPECT_EQ(rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   ::close(fd);
 }
@@ -771,7 +810,7 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   ASSERT_TRUE(read_exact(fd1, &dup_rej_hdr, sizeof(dup_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -789,7 +828,7 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   ASSERT_TRUE(read_exact(fd1, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &cancel_rej, sizeof(cancel_rej)));
   ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(cancel_rej.reason, 3);
+  ASSERT_EQ(cancel_rej.reason, static_cast<uint16_t>(wire::RejectReason::CancelNotFound));
 
   ::close(fd1);
 
@@ -819,7 +858,7 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
         metrics.reject_reason_counts[1] == 1u &&
         metrics.reject_reason_counts[2] == 1u &&
         metrics.journal_enqueued_events >= 2u &&
-        metrics.journal_dropped_events == 0u) {
+        metrics.journal_backpressure_events == 0u) {
       settled = true;
       break;
     }
@@ -833,7 +872,7 @@ TEST_F(ServerFixture, RejectFlowsUpdateCoordinatorMetricsTotals) {
   EXPECT_EQ(metrics.reject_reason_counts[1], 1u);
   EXPECT_EQ(metrics.reject_reason_counts[2], 1u);
   EXPECT_GE(metrics.journal_enqueued_events, 2u);
-  EXPECT_EQ(metrics.journal_dropped_events, 0u);
+  EXPECT_EQ(metrics.journal_backpressure_events, 0u);
   EXPECT_EQ(metrics.recovery_replay_attempted, 1u);
   EXPECT_EQ(metrics.recovery_replay_succeeded, 1u);
   EXPECT_EQ(metrics.recovery_error_code, 0u);
@@ -886,7 +925,7 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ASSERT_TRUE(read_exact(fd1, &dup_rej_hdr, sizeof(dup_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -904,7 +943,7 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ASSERT_TRUE(read_exact(fd1, &cancel_rej_hdr, sizeof(cancel_rej_hdr)));
   ASSERT_TRUE(read_exact(fd1, &cancel_rej, sizeof(cancel_rej)));
   ASSERT_EQ(cancel_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
-  ASSERT_EQ(cancel_rej.reason, 3);
+  ASSERT_EQ(cancel_rej.reason, static_cast<uint16_t>(wire::RejectReason::CancelNotFound));
 
   ::close(fd1);
 
@@ -928,6 +967,60 @@ TEST_F(SmallQueueServerFixture, MetricsReportDroppedEventsWhenQueueOverflows) {
   ASSERT_EQ(metrics_hdr.seq, 204);
 
   EXPECT_EQ(metrics.coordinator_dropped_events, 1u);
+
+  ::close(fd2);
+}
+
+TEST_F(TinyJournalQueueServerFixture, JournalBackpressureRejectsRequestAndEmitsInternalErrorMetric) {
+  const int fd1 = OpenClient();
+  ASSERT_GE(fd1, 0);
+
+  const wire::Header new_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::NewOrder),
+      .length = static_cast<uint16_t>(sizeof(wire::NewOrder)),
+      .seq = 211,
+  };
+  const wire::NewOrder new_msg{
+      .order_id = 21001,
+      .side = 0,
+      .price = 100,
+      .qty = 5,
+  };
+
+  ASSERT_TRUE(write_all(fd1, &new_hdr, sizeof(new_hdr)));
+  ASSERT_TRUE(write_all(fd1, &new_msg, sizeof(new_msg)));
+
+  wire::Header rej_hdr{};
+  wire::Reject rej{};
+  ASSERT_TRUE(read_exact(fd1, &rej_hdr, sizeof(rej_hdr)));
+  ASSERT_TRUE(read_exact(fd1, &rej, sizeof(rej)));
+
+  EXPECT_EQ(rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
+  EXPECT_EQ(rej_hdr.seq, 211);
+  EXPECT_EQ(rej.order_id, 21001u);
+  EXPECT_EQ(rej.reason, static_cast<uint16_t>(wire::RejectReason::JournalBackpressure));
+
+  ::close(fd1);
+
+  const int fd2 = OpenClient();
+  ASSERT_GE(fd2, 0);
+
+  const wire::Header get_metrics_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::GetMetrics),
+      .length = 0,
+      .seq = 212,
+  };
+  ASSERT_TRUE(write_all(fd2, &get_metrics_hdr, sizeof(get_metrics_hdr)));
+
+  wire::Header metrics_hdr{};
+  wire::MetricsSnapshot metrics{};
+  ASSERT_TRUE(read_exact(fd2, &metrics_hdr, sizeof(metrics_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
+
+  ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
+  ASSERT_EQ(metrics_hdr.seq, 212);
+  EXPECT_EQ(metrics.event_type_counts[5], 1u);
+  EXPECT_EQ(metrics.journal_backpressure_events, 1u);
 
   ::close(fd2);
 }
@@ -987,7 +1080,7 @@ TEST_F(RecoveryServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelCheck
   ASSERT_TRUE(read_exact(fd2, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   ASSERT_EQ(dup_rej.order_id, 30001u);
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -1067,7 +1160,7 @@ TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecksAsyncJo
   ASSERT_TRUE(read_exact(fd2, &dup_rej, sizeof(dup_rej)));
   ASSERT_EQ(dup_rej_hdr.type, static_cast<uint16_t>(wire::MsgType::Reject));
   ASSERT_EQ(dup_rej.order_id, 31001u);
-  ASSERT_EQ(dup_rej.reason, 6);
+  ASSERT_EQ(dup_rej.reason, static_cast<uint16_t>(wire::RejectReason::DuplicateOrderId));
 
   const wire::Header cancel_hdr{
       .type = static_cast<uint16_t>(wire::MsgType::Cancel),
@@ -1088,6 +1181,25 @@ TEST_F(ServerFixture, RestartRecoversLiveOrderForDuplicateAndCancelChecksAsyncJo
   ASSERT_EQ(cancel_ack_hdr.type, static_cast<uint16_t>(wire::MsgType::Ack));
   ASSERT_EQ(cancel_ack_hdr.seq, 313);
   ASSERT_EQ(cancel_ack.order_id, 31001u);
+
+  const wire::Header get_metrics_hdr{
+      .type = static_cast<uint16_t>(wire::MsgType::GetMetrics),
+      .length = 0,
+      .seq = 314,
+  };
+  ASSERT_TRUE(write_all(fd2, &get_metrics_hdr, sizeof(get_metrics_hdr)));
+
+  wire::Header metrics_hdr{};
+  wire::MetricsSnapshot metrics{};
+  ASSERT_TRUE(read_exact(fd2, &metrics_hdr, sizeof(metrics_hdr)));
+  ASSERT_TRUE(read_exact(fd2, &metrics, sizeof(metrics)));
+  ASSERT_EQ(metrics_hdr.type, static_cast<uint16_t>(wire::MsgType::MetricsSnapshot));
+  ASSERT_EQ(metrics_hdr.seq, 314);
+  EXPECT_EQ(metrics.journal_backpressure_events, 0u);
+  EXPECT_EQ(metrics.recovery_replay_attempted, 1u);
+  EXPECT_EQ(metrics.recovery_replay_succeeded, 1u);
+  EXPECT_GT(metrics.recovery_records_replayed, 0u);
+  EXPECT_EQ(metrics.recovery_error_code, 0u);
 
   ::close(fd2);
 }

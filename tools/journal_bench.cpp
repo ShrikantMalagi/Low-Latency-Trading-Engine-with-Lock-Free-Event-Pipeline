@@ -42,7 +42,7 @@ void run_bench(const char* label, Sink& sink, uint64_t total_events) {
         .price = 100,
         .qty = 1,
     };
-    if (sink.write(event)) {
+    if (sink.write(event) == hft::JournalWriteResult::Enqueued) {
       ++accepted;
     }
   }
@@ -54,10 +54,10 @@ void run_bench(const char* label, Sink& sink, uint64_t total_events) {
   const double throughput = seconds > 0.0 ? static_cast<double>(accepted) / seconds : 0.0;
 
   std::printf(
-      "%s accepted=%llu dropped=%llu flushed=%llu elapsed_ms=%.3f throughput_ev_s=%.0f\n",
+      "%s accepted=%llu backpressure=%llu flushed=%llu elapsed_ms=%.3f throughput_ev_s=%.0f\n",
       label,
       static_cast<unsigned long long>(accepted),
-      static_cast<unsigned long long>(sink.dropped()),
+      static_cast<unsigned long long>(sink.backpressure_events()),
       static_cast<unsigned long long>(sink.flushed()),
       static_cast<double>(elapsed_ns) / 1'000'000.0,
       throughput);

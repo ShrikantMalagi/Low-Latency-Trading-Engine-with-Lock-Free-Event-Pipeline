@@ -40,6 +40,12 @@ struct RecordingSink : CoordinatorEventSink {
   }
 };
 
+struct BackpressureJournalSink : JournalSink {
+  JournalWriteResult write(const OmsJournalEvent&) override {
+    return JournalWriteResult::Backpressure;
+  }
+};
+
 std::string make_temp_journal_path() {
   char tmp[] = "/tmp/hft_journal_XXXXXX";
   const int fd = ::mkstemp(tmp);
@@ -325,6 +331,26 @@ TEST(OrderCoordinator, InternalErrorEmittedWhenMakerFillTransitionFails) {
   ASSERT_TRUE(sink.events.back().reject_reason.has_value());
   EXPECT_EQ(*sink.events.back().reject_reason, ExecRejectReason::InvalidTransition);
   ASSERT_TRUE(sink.events.back().message.has_value());
+}
+
+TEST(OrderCoordinator, JournalBackpressureEmitsInternalError) {
+  Oms oms;
+  Exchange exchange;
+  RecordingSink sink;
+  BackpressureJournalSink journal_sink;
+  OrderCoordinator coordinator(oms, exchange, &sink, &journal_sink);
+
+  auto result = coordinator.submit_new(MakeBuy(9150, 100, 2));
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().order_id, 9150u);
+  EXPECT_EQ(result.error().reason, ExecRejectReason::InvalidTransition);
+  EXPECT_EQ(result.error().message, "journal backpressure");
+
+  ASSERT_EQ(sink.events.size(), 1u);
+  EXPECT_EQ(sink.events.back().type, CoordinatorEventType::InternalError);
+  EXPECT_EQ(sink.events.back().order_id, 9150u);
+  ASSERT_TRUE(sink.events.back().message.has_value());
+  EXPECT_EQ(*sink.events.back().message, "journal backpressure");
 }
 
 TEST(OrderCoordinator, QueueSinkCapturesAcceptedEvent) {
