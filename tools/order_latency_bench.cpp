@@ -104,6 +104,7 @@ int main(int argc, char* argv[]) {
   int order_count = 1000;
   uint64_t order_id_base =
       static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  bool verbose = false;
 
   if (argc > 1) {
     order_count = std::atoi(argv[1]);
@@ -118,6 +119,9 @@ int main(int argc, char* argv[]) {
       std::fprintf(stderr, "invalid order id base: %s\n", argv[2]);
       return 1;
     }
+  }
+  if (argc > 3 && std::string_view(argv[3]) == "--verbose") {
+    verbose = true;
   }
 
   const int fd = connect_to_server("127.0.0.1", 9000);
@@ -158,6 +162,12 @@ int main(int argc, char* argv[]) {
 
     const auto t0 = std::chrono::steady_clock::now();
 
+    if (verbose && i < 5) {
+      std::fprintf(stderr, "order=%d stage=write order_id=%llu\n",
+          i,
+          static_cast<unsigned long long>(msg.order_id));
+    }
+
     if (!write_all(fd, &hdr, sizeof(hdr))) {
       std::fprintf(stderr, "write header failed at order %d: %s\n", i, std::strerror(errno));
       ::close(fd);
@@ -170,10 +180,19 @@ int main(int argc, char* argv[]) {
     }
 
     wire::Header rsp_hdr{};
+    if (verbose && i < 5) {
+      std::fprintf(stderr, "order=%d stage=read_header_wait\n", i);
+    }
     if (!read_exact(fd, &rsp_hdr, sizeof(rsp_hdr))) {
       std::fprintf(stderr, "read response header failed at order %d: %s\n", i, std::strerror(errno));
       ::close(fd);
       return 4;
+    }
+    if (verbose && i < 5) {
+      std::fprintf(stderr, "order=%d stage=read_header_done type=%u len=%u\n",
+          i,
+          static_cast<unsigned>(rsp_hdr.type),
+          static_cast<unsigned>(rsp_hdr.length));
     }
 
     if (rsp_hdr.type == static_cast<uint16_t>(wire::MsgType::Ack)) {
@@ -189,6 +208,11 @@ int main(int argc, char* argv[]) {
         ::close(fd);
         return 6;
       }
+      if (verbose && i < 5) {
+        std::fprintf(stderr, "order=%d stage=ack_done ack_order_id=%llu\n",
+            i,
+            static_cast<unsigned long long>(ack.order_id));
+      }
       ++ack_count;
     } else if (rsp_hdr.type == static_cast<uint16_t>(wire::MsgType::Reject)) {
       wire::Reject rej{};
@@ -202,6 +226,12 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "read reject failed at order %d: %s\n", i, std::strerror(errno));
         ::close(fd);
         return 8;
+      }
+      if (verbose && i < 5) {
+        std::fprintf(stderr, "order=%d stage=reject_done reject_order_id=%llu reason=%u\n",
+            i,
+            static_cast<unsigned long long>(rej.order_id),
+            static_cast<unsigned>(rej.reason));
       }
       ++reject_count;
       std::fprintf(stderr, "reject at order=%d order_id=%llu reason=%u\n",
