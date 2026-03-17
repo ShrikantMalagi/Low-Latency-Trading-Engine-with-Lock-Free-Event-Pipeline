@@ -8,6 +8,7 @@
 #include "journal_sink.hpp"
 
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -160,6 +161,8 @@ namespace{
         while(true){
             int client_fd = ::accept(server_socket,nullptr,nullptr);
             if(client_fd >= 0){
+                int one = 1;
+                (void)::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
                 return client_fd;
             }
             

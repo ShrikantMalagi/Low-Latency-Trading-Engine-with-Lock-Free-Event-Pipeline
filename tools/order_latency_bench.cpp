@@ -7,9 +7,11 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <netinet/tcp.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
@@ -20,14 +22,45 @@ struct Sample {
   uint64_t latency_ns;
 };
 
-bool write_all(int fd, const void* buf, std::size_t n) {
-  const auto* p = static_cast<const char*>(buf);
-  std::size_t off = 0;
-  while (off < n) {
-    const ssize_t rc = ::write(fd, p + off, n - off);
-    if (rc <= 0) return false;
-    off += static_cast<std::size_t>(rc);
+bool write_all_vectored(int fd, const void* buf1, std::size_t len1, const void* buf2, std::size_t len2) {
+  const auto* p1 = static_cast<const char*>(buf1);
+  const auto* p2 = static_cast<const char*>(buf2);
+  std::size_t off1 = 0;
+  std::size_t off2 = 0;
+
+  while (off1 < len1 || off2 < len2) {
+    iovec iov[2];
+    int iovcnt = 0;
+
+    if (off1 < len1) {
+      iov[iovcnt].iov_base = const_cast<char*>(p1 + off1);
+      iov[iovcnt].iov_len = len1 - off1;
+      ++iovcnt;
+    }
+    if (off2 < len2) {
+      iov[iovcnt].iov_base = const_cast<char*>(p2 + off2);
+      iov[iovcnt].iov_len = len2 - off2;
+      ++iovcnt;
+    }
+
+    const ssize_t rc = ::writev(fd, iov, iovcnt);
+    if (rc <= 0) {
+      return false;
+    }
+
+    std::size_t written = static_cast<std::size_t>(rc);
+
+    if (off1 < len1) {
+      const std::size_t take1 = std::min(written, len1 - off1);
+      off1 += take1;
+      written -= take1;
+    }
+    if (written > 0 && off2 < len2) {
+      const std::size_t take2 = std::min(written, len2 - off2);
+      off2 += take2;
+    }
   }
+
   return true;
 }
 
@@ -98,6 +131,11 @@ bool set_socket_timeout(int fd, int seconds) {
   return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
          ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
 }
+
+bool set_tcp_nodelay(int fd) {
+  int one = 1;
+  return ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) == 0;
+}
 }
 
 int main(int argc, char* argv[]) {
@@ -135,6 +173,11 @@ int main(int argc, char* argv[]) {
     ::close(fd);
     return 1;
   }
+  if (!set_tcp_nodelay(fd)) {
+    std::fprintf(stderr, "failed to set TCP_NODELAY: %s\n", std::strerror(errno));
+    ::close(fd);
+    return 1;
+  }
 
   std::vector<uint64_t> latencies;
   latencies.reserve(static_cast<std::size_t>(order_count));
@@ -168,15 +211,10 @@ int main(int argc, char* argv[]) {
           static_cast<unsigned long long>(msg.order_id));
     }
 
-    if (!write_all(fd, &hdr, sizeof(hdr))) {
-      std::fprintf(stderr, "write header failed at order %d: %s\n", i, std::strerror(errno));
+    if (!write_all_vectored(fd, &hdr, sizeof(hdr), &msg, sizeof(msg))) {
+      std::fprintf(stderr, "write request failed at order %d: %s\n", i, std::strerror(errno));
       ::close(fd);
       return 2;
-    }
-    if (!write_all(fd, &msg, sizeof(msg))) {
-      std::fprintf(stderr, "write order failed at order %d: %s\n", i, std::strerror(errno));
-      ::close(fd);
-      return 3;
     }
 
     wire::Header rsp_hdr{};
