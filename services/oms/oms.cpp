@@ -171,7 +171,9 @@ namespace hft {
   
     auto& rec = it->second;
   
-    if (rec.status != OrderStatus::Live && rec.status != OrderStatus::PartiallyFilled) {
+    if (rec.status != OrderStatus::Live &&
+        rec.status != OrderStatus::PartiallyFilled &&
+        rec.status != OrderStatus::PendingCancel) {
       return std::unexpected(OmsError{
           .code = OmsErrorCode::InvalidTransition,
           .message = "fill in invalid state",
@@ -191,6 +193,8 @@ namespace hft {
   
     if (rec.remaining_qty == 0) {
       rec.status = OrderStatus::Filled;
+    } else if (rec.status == OrderStatus::PendingCancel) {
+      rec.status = OrderStatus::PendingCancel;
     } else {
       rec.status = OrderStatus::PartiallyFilled;
     }

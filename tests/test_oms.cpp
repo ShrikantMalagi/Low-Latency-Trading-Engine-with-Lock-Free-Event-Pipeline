@@ -299,6 +299,46 @@ TEST(Oms, CancelRejectRestoresPartiallyFilledOrder) {
   EXPECT_TRUE(oms.is_live(504));
 }
 
+TEST(Oms, FillWhilePendingCancelKeepsPendingCancelWhenSharesRemain) {
+  Oms oms;
+
+  ASSERT_TRUE(oms.submit_new(MakeBuy(508, 100, 8)).has_value());
+  ASSERT_TRUE(oms.on_new_ack(508).has_value());
+  ASSERT_TRUE(oms.submit_cancel(508).has_value());
+
+  auto result = oms.on_fill(508, 101, 3);
+  ASSERT_TRUE(result.has_value());
+
+  auto rec = oms.get(508);
+  ASSERT_TRUE(rec.has_value());
+  EXPECT_EQ(rec->status, OrderStatus::PendingCancel);
+  EXPECT_EQ(rec->filled_qty, 3);
+  EXPECT_EQ(rec->remaining_qty, 5);
+  ASSERT_TRUE(rec->last_fill_price.has_value());
+  EXPECT_EQ(*rec->last_fill_price, 101);
+  EXPECT_FALSE(oms.is_live(508));
+}
+
+TEST(Oms, FullFillWhilePendingCancelTransitionsToFilled) {
+  Oms oms;
+
+  ASSERT_TRUE(oms.submit_new(MakeBuy(509, 100, 8)).has_value());
+  ASSERT_TRUE(oms.on_new_ack(509).has_value());
+  ASSERT_TRUE(oms.submit_cancel(509).has_value());
+
+  auto result = oms.on_fill(509, 101, 8);
+  ASSERT_TRUE(result.has_value());
+
+  auto rec = oms.get(509);
+  ASSERT_TRUE(rec.has_value());
+  EXPECT_EQ(rec->status, OrderStatus::Filled);
+  EXPECT_EQ(rec->filled_qty, 8);
+  EXPECT_EQ(rec->remaining_qty, 0);
+  ASSERT_TRUE(rec->last_fill_price.has_value());
+  EXPECT_EQ(*rec->last_fill_price, 101);
+  EXPECT_FALSE(oms.is_live(509));
+}
+
 TEST(Oms, CancelRejectInWrongStateFails) {
   Oms oms;
 
