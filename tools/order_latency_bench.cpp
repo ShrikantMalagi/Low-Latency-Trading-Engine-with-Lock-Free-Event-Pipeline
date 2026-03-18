@@ -7,22 +7,60 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <netinet/tcp.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
 
 namespace {
-bool write_all(int fd, const void* buf, std::size_t n) {
-  const auto* p = static_cast<const char*>(buf);
-  std::size_t off = 0;
-  while (off < n) {
-    const ssize_t rc = ::write(fd, p + off, n - off);
-    if (rc <= 0) return false;
-    off += static_cast<std::size_t>(rc);
+struct Sample {
+  int order_index;
+  uint64_t latency_ns;
+};
+
+bool write_all_vectored(int fd, const void* buf1, std::size_t len1, const void* buf2, std::size_t len2) {
+  const auto* p1 = static_cast<const char*>(buf1);
+  const auto* p2 = static_cast<const char*>(buf2);
+  std::size_t off1 = 0;
+  std::size_t off2 = 0;
+
+  while (off1 < len1 || off2 < len2) {
+    iovec iov[2];
+    int iovcnt = 0;
+
+    if (off1 < len1) {
+      iov[iovcnt].iov_base = const_cast<char*>(p1 + off1);
+      iov[iovcnt].iov_len = len1 - off1;
+      ++iovcnt;
+    }
+    if (off2 < len2) {
+      iov[iovcnt].iov_base = const_cast<char*>(p2 + off2);
+      iov[iovcnt].iov_len = len2 - off2;
+      ++iovcnt;
+    }
+
+    const ssize_t rc = ::writev(fd, iov, iovcnt);
+    if (rc <= 0) {
+      return false;
+    }
+
+    std::size_t written = static_cast<std::size_t>(rc);
+
+    if (off1 < len1) {
+      const std::size_t take1 = std::min(written, len1 - off1);
+      off1 += take1;
+      written -= take1;
+    }
+    if (written > 0 && off2 < len2) {
+      const std::size_t take2 = std::min(written, len2 - off2);
+      off2 += take2;
+    }
   }
+
   return true;
 }
 
@@ -61,6 +99,31 @@ double percentile(std::vector<uint64_t> values, double p) {
   return static_cast<double>(values[idx]);
 }
 
+std::vector<Sample> slowest_samples(const std::vector<Sample>& samples, std::size_t limit) {
+  std::vector<Sample> slowest = samples;
+  std::sort(slowest.begin(), slowest.end(), [](const Sample& lhs, const Sample& rhs) {
+    if (lhs.latency_ns != rhs.latency_ns) {
+      return lhs.latency_ns > rhs.latency_ns;
+    }
+    return lhs.order_index < rhs.order_index;
+  });
+  if (slowest.size() > limit) {
+    slowest.resize(limit);
+  }
+  return slowest;
+}
+
+void print_slowest_samples(const std::vector<Sample>& samples, std::size_t limit) {
+  const auto slowest = slowest_samples(samples, limit);
+  for (const auto& sample : slowest) {
+    std::printf(
+        "slow_sample order=%d latency_ns=%llu latency_us=%.3f\n",
+        sample.order_index,
+        static_cast<unsigned long long>(sample.latency_ns),
+        static_cast<double>(sample.latency_ns) / 1000.0);
+  }
+}
+
 bool set_socket_timeout(int fd, int seconds) {
   timeval tv{};
   tv.tv_sec = seconds;
@@ -68,16 +131,35 @@ bool set_socket_timeout(int fd, int seconds) {
   return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
          ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
 }
+
+bool set_tcp_nodelay(int fd) {
+  int one = 1;
+  return ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) == 0;
+}
 }
 
 int main(int argc, char* argv[]) {
   int order_count = 1000;
+  uint64_t order_id_base =
+      static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  bool verbose = false;
+
   if (argc > 1) {
     order_count = std::atoi(argv[1]);
     if (order_count <= 0) {
       std::fprintf(stderr, "invalid order count: %s\n", argv[1]);
       return 1;
     }
+  }
+  if (argc > 2) {
+    order_id_base = std::strtoull(argv[2], nullptr, 10);
+    if (order_id_base == 0) {
+      std::fprintf(stderr, "invalid order id base: %s\n", argv[2]);
+      return 1;
+    }
+  }
+  if (argc > 3 && std::string_view(argv[3]) == "--verbose") {
+    verbose = true;
   }
 
   const int fd = connect_to_server("127.0.0.1", 9000);
@@ -91,13 +173,22 @@ int main(int argc, char* argv[]) {
     ::close(fd);
     return 1;
   }
+  if (!set_tcp_nodelay(fd)) {
+    std::fprintf(stderr, "failed to set TCP_NODELAY: %s\n", std::strerror(errno));
+    ::close(fd);
+    return 1;
+  }
 
   std::vector<uint64_t> latencies;
   latencies.reserve(static_cast<std::size_t>(order_count));
+  std::vector<Sample> samples;
+  samples.reserve(static_cast<std::size_t>(order_count));
   std::size_t ack_count = 0;
   std::size_t reject_count = 0;
 
   const auto bench_start = std::chrono::steady_clock::now();
+
+  std::printf("order_id_base=%llu\n", static_cast<unsigned long long>(order_id_base));
 
   for (int i = 0; i < order_count; ++i) {
     wire::Header hdr{
@@ -106,7 +197,7 @@ int main(int argc, char* argv[]) {
       .seq = static_cast<uint16_t>(i),
     };
     wire::NewOrder msg{
-      .order_id = static_cast<uint64_t>(100000 + i),
+      .order_id = order_id_base + static_cast<uint64_t>(i),
       .side = 0,
       .price = 100,
       .qty = 1,
@@ -114,22 +205,32 @@ int main(int argc, char* argv[]) {
 
     const auto t0 = std::chrono::steady_clock::now();
 
-    if (!write_all(fd, &hdr, sizeof(hdr))) {
-      std::fprintf(stderr, "write header failed at order %d: %s\n", i, std::strerror(errno));
+    if (verbose && i < 5) {
+      std::fprintf(stderr, "order=%d stage=write order_id=%llu\n",
+          i,
+          static_cast<unsigned long long>(msg.order_id));
+    }
+
+    if (!write_all_vectored(fd, &hdr, sizeof(hdr), &msg, sizeof(msg))) {
+      std::fprintf(stderr, "write request failed at order %d: %s\n", i, std::strerror(errno));
       ::close(fd);
       return 2;
     }
-    if (!write_all(fd, &msg, sizeof(msg))) {
-      std::fprintf(stderr, "write order failed at order %d: %s\n", i, std::strerror(errno));
-      ::close(fd);
-      return 3;
-    }
 
     wire::Header rsp_hdr{};
+    if (verbose && i < 5) {
+      std::fprintf(stderr, "order=%d stage=read_header_wait\n", i);
+    }
     if (!read_exact(fd, &rsp_hdr, sizeof(rsp_hdr))) {
       std::fprintf(stderr, "read response header failed at order %d: %s\n", i, std::strerror(errno));
       ::close(fd);
       return 4;
+    }
+    if (verbose && i < 5) {
+      std::fprintf(stderr, "order=%d stage=read_header_done type=%u len=%u\n",
+          i,
+          static_cast<unsigned>(rsp_hdr.type),
+          static_cast<unsigned>(rsp_hdr.length));
     }
 
     if (rsp_hdr.type == static_cast<uint16_t>(wire::MsgType::Ack)) {
@@ -145,6 +246,11 @@ int main(int argc, char* argv[]) {
         ::close(fd);
         return 6;
       }
+      if (verbose && i < 5) {
+        std::fprintf(stderr, "order=%d stage=ack_done ack_order_id=%llu\n",
+            i,
+            static_cast<unsigned long long>(ack.order_id));
+      }
       ++ack_count;
     } else if (rsp_hdr.type == static_cast<uint16_t>(wire::MsgType::Reject)) {
       wire::Reject rej{};
@@ -158,6 +264,12 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "read reject failed at order %d: %s\n", i, std::strerror(errno));
         ::close(fd);
         return 8;
+      }
+      if (verbose && i < 5) {
+        std::fprintf(stderr, "order=%d stage=reject_done reject_order_id=%llu reason=%u\n",
+            i,
+            static_cast<unsigned long long>(rej.order_id),
+            static_cast<unsigned>(rej.reason));
       }
       ++reject_count;
       std::fprintf(stderr, "reject at order=%d order_id=%llu reason=%u\n",
@@ -177,6 +289,10 @@ int main(int argc, char* argv[]) {
     const auto t1 = std::chrono::steady_clock::now();
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     latencies.push_back(static_cast<uint64_t>(ns));
+    samples.push_back(Sample{
+        .order_index = i,
+        .latency_ns = static_cast<uint64_t>(ns),
+    });
   }
 
   const auto bench_end = std::chrono::steady_clock::now();
@@ -200,6 +316,10 @@ int main(int argc, char* argv[]) {
   std::printf("p99_us=%.3f\n", percentile(latencies, 0.99) / 1000.0);
   std::printf("throughput_ops_s=%.0f\n",
       (static_cast<double>(latencies.size()) * 1'000'000'000.0) / static_cast<double>(total_ns));
+  print_slowest_samples(samples, 10);
+  if (reject_count > 0) {
+    std::fprintf(stderr, "benchmark encountered rejects; accepted-path latency is contaminated\n");
+  }
 
   ::close(fd);
   return 0;
